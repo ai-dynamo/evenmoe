@@ -1,5 +1,9 @@
-// Copyright (c) 2025 DeepSeek
+// SPDX-FileCopyrightText: Copyright (c) 2025 DeepSeek
 // SPDX-License-Identifier: MIT
+//
+// Modifications:
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
 //
 // Single-SM Interior Point Method (IPM) LP solver.
 //

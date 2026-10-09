@@ -232,3 +232,5 @@ We thank DeepSeek for [EPLB](https://github.com/deepseek-ai/EPLB) and [LPLB](htt
 ## License
 
 Licensed under [Apache-2.0](https://github.com/ai-dynamo/moe-load-balancer/blob/main/LICENSE). See [Third-Party Notices](https://github.com/ai-dynamo/moe-load-balancer/blob/main/THIRD_PARTY_NOTICES.md) for components adapted from DeepSeek, SGLang, and UltraEP.
+
+The UltraEP kernels under `src/moe_load_balancer/kernels/ultraep/` are adapted from [UltraEP](https://github.com/Dots-Infra/UltraEP). The upstream code stays under the MIT license in [LICENSE.ultraep](https://github.com/ai-dynamo/moe-load-balancer/blob/main/src/moe_load_balancer/kernels/ultraep/LICENSE.ultraep), and NVIDIA's modifications are under Apache-2.0. Each adapted file carries both notices in its header.
