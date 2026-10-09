@@ -45,7 +45,7 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.5"
-          python -m pip install ruff mypy pytest
+          python -m pip install "triton>=3.0" ruff mypy pytest
           python -m pip install -e . --no-deps
 
       - name: Lint
