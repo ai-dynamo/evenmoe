@@ -80,7 +80,9 @@ def _signoff(tmp_path: pathlib.Path, message: str) -> int:
     message_file = tmp_path / "msg"
     message_file.write_text(message)
     result = subprocess.run(
-        ["bash", str(TOOLS / "check_signoff.sh"), str(message_file)], capture_output=True
+        ["bash", str(TOOLS / "check_signoff.sh"), str(message_file)],
+        capture_output=True,
+        check=False,
     )
     return result.returncode
 
@@ -103,6 +105,7 @@ def test_signoff_rejects_unresolvable_range() -> None:
     result = subprocess.run(
         ["bash", str(TOOLS / "check_signoff.sh"), "--range", "0" * 39 + "1", "HEAD"],
         capture_output=True,
+        check=False,
         cwd=TOOLS.parent,
     )
     assert result.returncode == 1
