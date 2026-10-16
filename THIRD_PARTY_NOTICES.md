@@ -1,7 +1,7 @@
 # Third-Party Notices
 
 This repository contains code copied or adapted from the projects below.
-Modifications made for MoE Load Balancer are distributed under the repository's
+Modifications made for EvenMoE are distributed under the repository's
 Apache-2.0 license; the original portions remain subject to their original
 licenses.
 
@@ -10,8 +10,8 @@ licenses.
 - Source: <https://github.com/deepseek-ai/EPLB>
 - License: MIT
 - Local code:
-  `src/moe_load_balancer/policies/l1/eplb/algorithms/deepseek.py` and
-  `src/moe_load_balancer/policies/l1/eplb/algorithms/deepseek_vec.py`
+  `src/evenmoe/policies/l1/eplb/algorithms/deepseek.py` and
+  `src/evenmoe/policies/l1/eplb/algorithms/deepseek_vec.py`
 - Copyright: Copyright (c) 2025 DeepSeek
 
 ## DeepSeek LPLB
@@ -19,7 +19,7 @@ licenses.
 - Source: <https://github.com/deepseek-ai/LPLB>
 - License: MIT
 - Local code: the Interior Point Method implementation in
-  `src/moe_load_balancer/kernels/lplb/csrc/ipm.cuh`
+  `src/evenmoe/kernels/lplb/csrc/ipm.cuh`
 - Copyright: Copyright (c) 2025 DeepSeek
 
 The MIT-licensed components above are distributed under the following terms:
@@ -50,14 +50,14 @@ The MIT-licensed components above are distributed under the following terms:
 - License: Apache License 2.0
 - Copyright: Copyright 2023-2026 SGLang Team
 - Local code includes the LPLB policy and CUDA/JIT support under
-  `src/moe_load_balancer/policies/l2/lplb.py`,
+  `src/evenmoe/policies/l2/lplb.py`,
   the static, dynamic, and experimental fake replica-routing behavior in
-  `src/moe_load_balancer/policies/l2/replica.py`,
-  `src/moe_load_balancer/kernels/jit/utils.py`, the JIT kernel helper headers
-  in `src/moe_load_balancer/kernels/jit/include/moe_lb_jit/`, and
-  `src/moe_load_balancer/kernels/lplb/`, plus the Elastic-EP-aware placement
+  `src/evenmoe/policies/l2/replica.py`,
+  `src/evenmoe/kernels/jit/utils.py`, the JIT kernel helper headers
+  in `src/evenmoe/kernels/jit/include/evenmoe_jit/`, and
+  `src/evenmoe/kernels/lplb/`, plus the Elastic-EP-aware placement
   policy in
-  `src/moe_load_balancer/policies/l1/eplb/algorithms/elasticity_aware.py`.
+  `src/evenmoe/policies/l1/eplb/algorithms/elasticity_aware.py`.
 
 The Apache License 2.0 text is provided in the repository's `LICENSE` file.
 
@@ -68,10 +68,10 @@ The Apache License 2.0 text is provided in the repository's `LICENSE` file.
 - License: MIT
 - Copyright: Copyright (c) 2026 PKU-DASYS and Dots-Infra
 - Local code: placement and sparse quota-rerouting kernels under
-  `src/moe_load_balancer/kernels/ultraep/csrc/`, JIT-compiled through MLB's
+  `src/evenmoe/kernels/ultraep/csrc/`, JIT-compiled through EvenMoE's
   tvm-ffi loader (the entry point at the end of each kernel file and
-  `csrc/entry.cuh` are MLB's); the UltraEP communication runtime is not copied
-  into MLB.
+  `csrc/entry.cuh` are EvenMoE's); the UltraEP communication runtime is not copied
+  into EvenMoE.
 
 The original MIT license is retained at
-`src/moe_load_balancer/kernels/ultraep/LICENSE.ultraep`.
+`src/evenmoe/kernels/ultraep/LICENSE.ultraep`.

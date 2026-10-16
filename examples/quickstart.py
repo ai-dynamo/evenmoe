@@ -5,8 +5,8 @@
 
 import torch
 
-from moe_load_balancer import MoELoadBalancer
-from moe_load_balancer.adapters.sglang import to_placement_request
+from evenmoe import MoELoadBalancer
+from evenmoe.adapters.sglang import to_placement_request
 
 
 def main() -> None:

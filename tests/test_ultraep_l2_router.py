@@ -4,14 +4,14 @@
 import pytest
 import torch
 
-from moe_load_balancer import (
+from evenmoe import (
     MoELoadBalancer,
     PlacementSnapshot,
     RoutingPhase,
     RoutingPolicyConfig,
     RoutingRequest,
 )
-from moe_load_balancer.policies.l2.ultraep import UltraEPL2Router
+from evenmoe.policies.l2.ultraep import UltraEPL2Router
 
 
 class _Backend:

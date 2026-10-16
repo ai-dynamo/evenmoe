@@ -4,14 +4,14 @@
 import pytest
 import torch
 
-from moe_load_balancer import (
+from evenmoe import (
     PlacementPolicyConfig,
     PlacementRequest,
     PlacementStats,
     PlacementTopology,
 )
-from moe_load_balancer.kernels.ultraep.config import UltraEPPlacementTuning
-from moe_load_balancer.policies.l1.ultraep import UltraEPPlacementPolicy
+from evenmoe.kernels.ultraep.config import UltraEPPlacementTuning
+from evenmoe.policies.l1.ultraep import UltraEPPlacementPolicy
 
 
 class _Backend:
@@ -77,7 +77,7 @@ def test_ultraep_placement_policy_handles_multiple_layers():
     if not torch.cuda.is_available():
         pytest.skip("requires a CUDA device")
 
-    from moe_load_balancer.kernels.ultraep import UltraEPPlacementBackend
+    from evenmoe.kernels.ultraep import UltraEPPlacementBackend
 
     ep_size, local_masters, local_redundant = 8, 8, 2
     num_logical = ep_size * local_masters

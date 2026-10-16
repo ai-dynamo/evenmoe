@@ -1,27 +1,27 @@
-# MoE Load Balancer
+# EvenMoE
 
 > **Experimental.** This is an early release. Interfaces and behavior may change between versions.
 
-A framework-independent library for expert placement and token routing in Mixture-of-Experts inference aiming to solve the MoE load imbalance issue and improve the MoE model serving efficiency. MoE Load Balancer (MLB) brings placement and routing policies behind a unified Python API, with adapters for different inference backend.
+A framework-independent library for expert placement and token routing in Mixture-of-Experts inference aiming to solve the MoE load imbalance issue and improve the MoE model serving efficiency. EvenMoE brings placement and routing policies behind a unified Python API, with adapters for different inference backend.
 
-![MoE Load Balancer — Expert placement. Balanced routing.](assets/banner-nvidia-green.png)
+![EvenMoE — Expert placement. Balanced routing.](assets/banner-nvidia-green.png)
 
 [Architecture](#architecture) · [Supported Models](#supported-models) · [Algorithms and Integrations](#supported-algorithms-and-integrations) · [Performance](#performance) · [Quick Start](#quick-start) · [Guidance](#guidance) · [Roadmap](#roadmap)
 
 ## Architecture
 
-MLB balances work at two levels:
+EvenMoE balances work at two levels:
 
 - **L1 — Expert placement:** chooses which logical experts occupy physical expert slots across GPUs, including redundant replicas.
 - **L2 — Token routing:** selects a physical replica for each logical routing expert selected by TopK and, when enabled, a destination GPU for shared-expert computation.
 
-![MoE Load Balancer architecture: framework adapters connect SGLang and vLLM to L1 expert placement and L2 token routing; the framework commits placement before routing uses it.](assets/architecture.png)
+![EvenMoE architecture: framework adapters connect SGLang and vLLM to L1 expert placement and L2 token routing; the framework commits placement before routing uses it.](assets/architecture.png)
 
-The architecture separates framework-independent policy logic from framework-specific execution. Policies consume standardized request objects and return standardized placement or routing results, while adapters convert each serving framework’s native tensors and metadata into these common representations. The serving framework remains responsible for model execution, communication-group management, rebalance scheduling, and committing updated expert placements. MLB is responsible for computing the placement and routing decisions used by the framework. GPU-accelerated policies rely on the packaged CUDA and Triton kernels for efficient execution.
+The architecture separates framework-independent policy logic from framework-specific execution. Policies consume standardized request objects and return standardized placement or routing results, while adapters convert each serving framework’s native tensors and metadata into these common representations. The serving framework remains responsible for model execution, communication-group management, rebalance scheduling, and committing updated expert placements. EvenMoE is responsible for computing the placement and routing decisions used by the framework. GPU-accelerated policies rely on the packaged CUDA and Triton kernels for efficient execution.
 
 ## Supported Models
 
-MLB is validated on the following MoE model families for SGLang serving:
+EvenMoE is validated on the following MoE model families for SGLang serving:
 
 | Family | Models |
 |:---|:---|
@@ -36,7 +36,7 @@ Shared-expert routing (Waterfill) applies to models with a shared expert (DeepSe
 
 ✅ Supported &nbsp;&nbsp; 🚧 On-going &nbsp;&nbsp; ❌ Not supported
 
-Support below refers to MLB's `main`-branch adapters; serving requires the corresponding framework-side hooks. Branch-specific launch instructions are provided in [Guidance](#guidance).
+Support below refers to EvenMoE's `main`-branch adapters; serving requires the corresponding framework-side hooks. Branch-specific launch instructions are provided in [Guidance](#guidance).
 
 | Level | Algorithm | SGLang | vLLM |
 |:---|:---|:---:|:---:|
@@ -53,7 +53,7 @@ Compose L2 policies with `+`, for example `lplb+waterfill` or `ultraep+waterfill
 
 ## Performance
 
-SGLang prefill throughput with **DeepSeek-V3 (FP8)** on **one node with 8 × NVIDIA Hopper GPUs** (TP8 / DP8 / EP8, DeepEP). Every MLB arm allocates **32 redundant expert replicas** (`--ep-num-redundant-experts 32`); the baseline uses none. Values are median input throughput in **K tokens/s**; percentages show the change from the baseline on the same dataset.
+SGLang prefill throughput with **DeepSeek-V3 (FP8)** on **one node with 8 × NVIDIA Hopper GPUs** (TP8 / DP8 / EP8, DeepEP). Every EvenMoE arm allocates **32 redundant expert replicas** (`--ep-num-redundant-experts 32`); the baseline uses none. Values are median input throughput in **K tokens/s**; percentages show the change from the baseline on the same dataset.
 
 Placement is recorded once per dataset. **Same-domain** serves the dataset its placement was recorded from; **cross-domain** serves the other dataset. UltraEP is online-adaptive, so it has no same/cross split (both columns repeat its value).
 
@@ -82,8 +82,8 @@ GPU kernels additionally require a compatible NVIDIA GPU and CUDA toolchain.
 | NVIDIA MathDX (`nvidia-mathdx`) | 25.6.0 (exact) |
 
 ```bash
-git clone https://github.com/ai-dynamo/moe-load-balancer.git
-cd moe_load_balancer
+git clone https://github.com/ai-dynamo/evenmoe.git
+cd evenmoe
 python -m pip install -e .
 ```
 
@@ -96,8 +96,8 @@ Generate an expert placement from per-expert token counts:
 ```python
 import torch
 
-from moe_load_balancer import MoELoadBalancer
-from moe_load_balancer.adapters.sglang import to_placement_request
+from evenmoe import MoELoadBalancer
+from evenmoe.adapters.sglang import to_placement_request
 
 request = to_placement_request(
     torch.tensor([[20, 3, 9, 4], [5, 16, 2, 7]]),
@@ -116,11 +116,11 @@ The returned plan assigns eight physical slots per layer to four logical experts
 
 ## Guidance
 
-Install MLB and DeepEP into the serving framework's Python environment. The examples below target the linked integration branches, not stock framework releases. Replace the model path with a compatible MoE checkpoint that fits the available GPU memory.
+Install EvenMoE and DeepEP into the serving framework's Python environment. The examples below target the linked integration branches, not stock framework releases. Replace the model path with a compatible MoE checkpoint that fits the available GPU memory.
 
 ### SGLang
 
-Use the [SGLang `sglang-moe-lb-waterfill-dev`](https://github.com/xutizhou/sglang-moe-lb-waterfill-dev) fork (its `main` branch) with MLB installed as shown in Quick Start. Server arguments expose L1 placement (`--eplb-algorithm` / `--init-expert-location`) and L2 routing (`--moe-load-balancer-algorithm`) as separate selectors; see [Supported Algorithms](#supported-algorithms-and-integrations) for what SGLang supports.
+Use the [SGLang `sglang-moe-lb-waterfill-dev`](https://github.com/xutizhou/sglang-moe-lb-waterfill-dev) fork (its `main` branch) with EvenMoE installed as shown in Quick Start. Server arguments expose L1 placement (`--eplb-algorithm` / `--init-expert-location`) and L2 routing (`--moe-load-balancer-algorithm`) as separate selectors; see [Supported Algorithms](#supported-algorithms-and-integrations) for what SGLang supports.
 
 Start **EPLB + LPLB + Waterfill** on one node with eight GPUs (Waterfill requires a shared-expert model):
 
@@ -154,11 +154,11 @@ LPLB requires redundant replicas (`--ep-num-redundant-experts > 0`) and a record
 
 ### vLLM
 
-Use [vLLM `feat/vllm_mlb`](https://github.com/yunyang1999/vllm/tree/feat/vllm_mlb) with MLB `main`. Install the fork as you would upstream vLLM, then MLB into the same environment:
+Use [vLLM `feat/vllm_mlb`](https://github.com/yunyang1999/vllm/tree/feat/vllm_mlb) with EvenMoE `main`. Install the fork as you would upstream vLLM, then EvenMoE into the same environment:
 
 ```bash
-git clone https://github.com/ai-dynamo/moe-load-balancer.git
-python -m pip install -e ./moe_load_balancer --no-deps
+git clone https://github.com/ai-dynamo/evenmoe.git
+python -m pip install -e ./evenmoe --no-deps
 ```
 
 Start **EPLB + LPLB** on one node with eight GPUs (TP2 / DP4 / EP8):
@@ -223,7 +223,7 @@ UltraEP re-solves placement and replica quotas every `MLB_ULTRAEP_REFRESH_INTERV
 
 ## Contributing
 
-Bug reports, algorithm ideas, and integration improvements are welcome through [Issues](https://github.com/ai-dynamo/moe-load-balancer/issues) and pull requests.
+Bug reports, algorithm ideas, and integration improvements are welcome through [Issues](https://github.com/ai-dynamo/evenmoe/issues) and pull requests.
 
 ## Acknowledgments
 
@@ -231,6 +231,6 @@ We thank DeepSeek for [EPLB](https://github.com/deepseek-ai/EPLB) and [LPLB](htt
 
 ## License
 
-Licensed under [Apache-2.0](https://github.com/ai-dynamo/moe-load-balancer/blob/main/LICENSE). See [Third-Party Notices](https://github.com/ai-dynamo/moe-load-balancer/blob/main/THIRD_PARTY_NOTICES.md) for components adapted from DeepSeek, SGLang, and UltraEP.
+Licensed under [Apache-2.0](https://github.com/ai-dynamo/evenmoe/blob/main/LICENSE). See [Third-Party Notices](https://github.com/ai-dynamo/evenmoe/blob/main/THIRD_PARTY_NOTICES.md) for components adapted from DeepSeek, SGLang, and UltraEP.
 
-The UltraEP kernels under `src/moe_load_balancer/kernels/ultraep/` are adapted from [UltraEP](https://github.com/Dots-Infra/UltraEP). The upstream code stays under the MIT license in [LICENSE.ultraep](https://github.com/ai-dynamo/moe-load-balancer/blob/main/src/moe_load_balancer/kernels/ultraep/LICENSE.ultraep), and NVIDIA's modifications are under Apache-2.0. Each adapted file carries both notices in its header.
+The UltraEP kernels under `src/evenmoe/kernels/ultraep/` are adapted from [UltraEP](https://github.com/Dots-Infra/UltraEP). The upstream code stays under the MIT license in [LICENSE.ultraep](https://github.com/ai-dynamo/evenmoe/blob/main/src/evenmoe/kernels/ultraep/LICENSE.ultraep), and NVIDIA's modifications are under Apache-2.0. Each adapted file carries both notices in its header.

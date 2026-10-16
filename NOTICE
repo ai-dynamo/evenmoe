@@ -1,4 +1,4 @@
-MoE Load Balancer
+EvenMoE
 Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 This product includes software developed by the SGLang Team, licensed under
@@ -11,5 +11,5 @@ the applicable copyright and permission notice.
 This product includes and adapts software developed by PKU-DASYS and
 Dots-Infra (UltraEP), licensed under the MIT License. See
 THIRD_PARTY_NOTICES.md for source-level details and
-src/moe_load_balancer/kernels/ultraep/LICENSE.ultraep for the applicable
+src/evenmoe/kernels/ultraep/LICENSE.ultraep for the applicable
 copyright and permission notice.

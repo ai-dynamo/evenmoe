@@ -16,7 +16,7 @@ import torch
 def test_dispatch_probability_preserves_padded_and_out_of_range_ids():
     """Invalid TopK slots must not index before or after the dispatch tables."""
 
-    from moe_load_balancer.kernels.lplb.cuda_solver import dispatch_probability
+    from evenmoe.kernels.lplb.cuda_solver import dispatch_probability
 
     topk_ids = torch.tensor([[0, -1, 2, 3]], dtype=torch.int32, device="cuda")
     probabilities = torch.tensor(
@@ -44,9 +44,9 @@ def test_dispatch_probability_preserves_padded_and_out_of_range_ids():
 def test_lp_prep_accepts_an_all_replicated_placement():
     """A valid placement may have no single-copy logical experts."""
 
-    from moe_load_balancer.core.types import PlacementSnapshot
-    from moe_load_balancer.kernels.lplb.cuda_solver import prep_lp_inputs
-    from moe_load_balancer.policies.l2.lplb import _build_layer_state
+    from evenmoe.core.types import PlacementSnapshot
+    from evenmoe.kernels.lplb.cuda_solver import prep_lp_inputs
+    from evenmoe.policies.l2.lplb import _build_layer_state
 
     device = torch.device("cuda")
     snapshot = PlacementSnapshot(
@@ -110,7 +110,7 @@ def test_folded_recording_counts_what_a_separate_pass_would():
     decision downstream, since the next rearrangement is planned from exactly
     these numbers.
     """
-    from moe_load_balancer.kernels.lplb import cuda_solver
+    from evenmoe.kernels.lplb import cuda_solver
 
     torch.manual_seed(0)
     NL, RED, TOKENS, TOPK = 256, 32, 4096, 8
@@ -170,7 +170,7 @@ def test_uniform_mode_matches_the_framework_kernel_exactly():
         _eplb_map_and_record_triton,
     )
 
-    from moe_load_balancer.kernels.lplb import cuda_solver
+    from evenmoe.kernels.lplb import cuda_solver
 
     for num_logical, num_redundant, tokens, topk, seed in (
         (256, 32, 4096, 8, 0),
@@ -213,7 +213,7 @@ def test_uniform_mode_matches_the_framework_kernel_exactly():
 @pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
 @pytest.mark.parametrize("uniform", [False, True])
 def test_empty_dispatch_does_not_launch_or_modify_recorded_load(dtype, uniform):
-    from moe_load_balancer.kernels.lplb.cuda_solver import dispatch_probability
+    from evenmoe.kernels.lplb.cuda_solver import dispatch_probability
 
     ids = torch.empty((0, 2), dtype=dtype, device="cuda")
     candidates = torch.tensor([[0, 2], [1, 3]], dtype=torch.int32, device="cuda")

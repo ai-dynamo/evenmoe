@@ -6,14 +6,14 @@ from __future__ import annotations
 import pytest
 import torch
 
-from moe_load_balancer import (
+from evenmoe import (
     ExpertDeploymentConfig,
     MoELoadBalancer,
     PlacementSnapshot,
     RoutingPhase,
     RoutingPipeline,
 )
-from moe_load_balancer.core.policy import PolicyRegistry, RoutingPolicySpec
+from evenmoe.core.policy import PolicyRegistry, RoutingPolicySpec
 
 
 def _placement() -> PlacementSnapshot:
@@ -397,7 +397,7 @@ def test_registry_rejects_a_required_placement_that_is_not_registered():
 
 @pytest.mark.unit
 def test_default_placement_planners_come_from_the_registry():
-    from moe_load_balancer.policies.registry import builtin_registry
+    from evenmoe.policies.registry import builtin_registry
 
     mlb = MoELoadBalancer()
 

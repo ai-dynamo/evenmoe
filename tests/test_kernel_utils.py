@@ -8,7 +8,7 @@ import pathlib
 
 import pytest
 
-from moe_load_balancer.kernels.jit.utils import (
+from evenmoe.kernels.jit.utils import (
     INCLUDE_PATH,
     _find_package_root,
     get_mathdx_root,
@@ -17,17 +17,17 @@ from moe_load_balancer.kernels.jit.utils import (
 
 @pytest.mark.unit
 def test_find_package_root_handles_regular_packages():
-    root = _find_package_root("moe_load_balancer")
+    root = _find_package_root("evenmoe")
     assert root is not None
     assert (root / "kernels").is_dir()
 
 
 @pytest.mark.unit
 def test_shared_jit_headers_ship_next_to_the_loader():
-    """``load_jit`` puts ``INCLUDE_PATH`` on every build; the ``moe_lb_jit``
+    """``load_jit`` puts ``INCLUDE_PATH`` on every build; the ``evenmoe_jit``
     headers every kernel package includes must be there."""
     for name in ("tensor.h", "utils.h", "utils.cuh", "source_location.h"):
-        assert (INCLUDE_PATH / "moe_lb_jit" / name).is_file(), name
+        assert (INCLUDE_PATH / "evenmoe_jit" / name).is_file(), name
 
 
 @pytest.mark.unit
@@ -40,7 +40,7 @@ def test_find_package_root_handles_namespace_packages():
     kernels compile against -- is distributed this way, so resolving only via
     ``origin`` reports a pip-installed ``nvidia-mathdx`` as absent.
     """
-    spec = importlib.util.find_spec("moe_load_balancer")
+    spec = importlib.util.find_spec("evenmoe")
     assert spec is not None and spec.origin is not None, (
         "precondition: this test compares against a regular package"
     )
@@ -55,7 +55,7 @@ def test_find_package_root_handles_namespace_packages():
 
 @pytest.mark.unit
 def test_find_package_root_returns_none_for_missing_package():
-    assert _find_package_root("moe_load_balancer_does_not_exist") is None
+    assert _find_package_root("evenmoe_does_not_exist") is None
     # A missing parent makes find_spec raise rather than return None.
     assert _find_package_root("no_such_parent.child") is None
 

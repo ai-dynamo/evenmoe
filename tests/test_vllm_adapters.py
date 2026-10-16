@@ -6,8 +6,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from moe_load_balancer import PlacementPlan, RoutingDecision, RoutingStage
-from moe_load_balancer.adapters.vllm import (
+from evenmoe import PlacementPlan, RoutingDecision, RoutingStage
+from evenmoe.adapters.vllm import (
     collapse_candidates_to_local,
     nearest_replica_table,
     stage_from_vllm,
@@ -47,7 +47,7 @@ def test_l1_request_is_a_plain_translation():
 
     assert request.stats.logical_count is weight
     assert request.topology.num_physical_experts == 8
-    # vLLM speaks in ranks; MLB's topology is per-rank slots.
+    # vLLM speaks in ranks; EvenMoE's topology is per-rank slots.
     assert request.topology.num_local_physical_experts == 4
     assert request.policy.name == "deepseek"
     assert request.metadata["framework"] == "vllm"
@@ -57,7 +57,7 @@ def test_l1_request_is_a_plain_translation():
 def test_l1_request_carries_caller_rank_for_ultraep():
     # ultraep's placement kernel solves once per EP rank and validates the
     # value is in range, so the request must carry which rank is calling --
-    # every other MLB policy ignores it.
+    # every other EvenMoE policy ignores it.
     request = to_placement_request(
         torch.tensor([[1.0, 1.0, 1.0, 1.0]]),
         num_replicas=8,
@@ -197,7 +197,7 @@ def test_shared_expert_decision_is_handed_back_not_dropped():
     """A shared-expert rank reaches the framework through
     `to_vllm_shared_expert_rank`; `to_vllm_topk_ids` answers only about
     physical ids, and a decision without a rank yields None."""
-    from moe_load_balancer.adapters.vllm import to_vllm_shared_expert_rank
+    from evenmoe.adapters.vllm import to_vllm_shared_expert_rank
 
     rank = torch.tensor([0, 3], dtype=torch.int64)
     decision = RoutingDecision(

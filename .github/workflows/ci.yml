@@ -52,7 +52,7 @@ jobs:
         run: python -m ruff check .
 
       - name: Type check
-        run: python -m mypy src/moe_load_balancer
+        run: python -m mypy src/evenmoe
 
       - name: Unit tests
         run: python -m pytest -m "not integration"
@@ -84,4 +84,4 @@ jobs:
           python -m pip install --force-reinstall --no-deps dist/*.whl
           # Resolve the package from site-packages, not the checkout.
           cd /tmp
-          python -c "import moe_load_balancer; print('wheel import OK:', moe_load_balancer.__name__)"
+          python -c "import evenmoe; print('wheel import OK:', evenmoe.__name__)"

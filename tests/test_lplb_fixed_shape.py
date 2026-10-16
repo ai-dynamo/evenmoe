@@ -31,8 +31,8 @@ objective would be worse than the stall it removes.
 import pytest
 import torch
 
-from moe_load_balancer.core.types import PlacementSnapshot
-from moe_load_balancer.policies.l2.lplb import _SHAPE_BUCKET, _build_layer_state
+from evenmoe.core.types import PlacementSnapshot
+from evenmoe.policies.l2.lplb import _SHAPE_BUCKET, _build_layer_state
 
 NUM_LOGICAL, NUM_GPUS = 64, 8
 
@@ -315,7 +315,7 @@ def test_enumerated_shape_set_covers_everything_that_can_occur():
     """
     import random
 
-    from moe_load_balancer.policies.l2.lplb import bucketed_shape_set
+    from evenmoe.policies.l2.lplb import bucketed_shape_set
 
     rng = random.Random(0)
     for num_redundant in (8, 16, 32):
@@ -370,7 +370,7 @@ def test_the_whole_shape_set_is_compiled_before_the_first_solve():
     _sys.path.insert(0, str(_Path(__file__).resolve().parent))
     from test_lplb_policy import _RecordingKernels
 
-    from moe_load_balancer.policies.l2.lplb import (
+    from evenmoe.policies.l2.lplb import (
         LPLBL2Router,
         bucketed_shape_set,
     )
@@ -400,8 +400,8 @@ def test_every_replica_policy_survives_the_fused_path():
     engine fails to start. That is exactly how `static` reached a benchmark
     with a missing positional argument.
     """
-    from moe_load_balancer.core.types import RoutingPolicyConfig, RoutingRequest
-    from moe_load_balancer.policies.l2.replica import (
+    from evenmoe.core.types import RoutingPolicyConfig, RoutingRequest
+    from evenmoe.policies.l2.replica import (
         DynamicL2Router,
         StaticL2Router,
     )
@@ -419,7 +419,7 @@ def test_every_replica_policy_survives_the_fused_path():
     # `static` routes through the framework-chosen default replica, so the
     # snapshot has to carry one; without it the policy refuses rather than
     # inventing a choice.
-    from moe_load_balancer.adapters.vllm import nearest_replica_table
+    from evenmoe.adapters.vllm import nearest_replica_table
 
     defaults = nearest_replica_table(
         snap.logical_to_physical_candidates.to(torch.int64),

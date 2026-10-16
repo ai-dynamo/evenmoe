@@ -22,7 +22,7 @@ pytestmark = [
 def test_placement_backend_matches_ultraep_reference_extension():
     ultraep_extension = pytest.importorskip("ultra_ep._C")
 
-    from moe_load_balancer.kernels.ultraep import (
+    from evenmoe.kernels.ultraep import (
         UltraEPPlacementBackend,
         UltraEPPlacementTuning,
     )
@@ -102,7 +102,7 @@ def test_placement_backend_matches_ultraep_reference_extension():
 
 @pytest.mark.parametrize("topk_dtype", [torch.int32, torch.int64])
 def test_sparse_reroute_quota_on_non_default_stream(topk_dtype):
-    from moe_load_balancer.kernels.ultraep import UltraEPPlacementBackend
+    from evenmoe.kernels.ultraep import UltraEPPlacementBackend
 
     device = torch.device("cuda")
     backend = UltraEPPlacementBackend()

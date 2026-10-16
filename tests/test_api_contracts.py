@@ -5,7 +5,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from moe_load_balancer import (
+from evenmoe import (
     PlacementPlan,
     PlacementSnapshot,
     RoutingDecision,

@@ -6,12 +6,12 @@ from __future__ import annotations
 import pytest
 import torch
 
-from moe_load_balancer.policies.l1.eplb.algorithms import (
+from evenmoe.policies.l1.eplb.algorithms import (
     EplbAlgorithm,
     compute_algorithm,
     rebalance_experts,
 )
-from moe_load_balancer.policies.l1.eplb.algorithms.deepseek import balanced_packing
+from evenmoe.policies.l1.eplb.algorithms.deepseek import balanced_packing
 
 _COUNTS = torch.tensor(
     [

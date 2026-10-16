@@ -1,15 +1,15 @@
-# Contributing to MoE Load Balancer
+# Contributing to EvenMoE
 
 We welcome new model integrations, load-balancing algorithms, framework integrations, correctness fixes, and documentation.
 Contributions should reuse existing interfaces to make each extension testable, composable, and maintainable.
 
 ## 1. How the project should grow
 
-MoE Load Balancer (MLB) is a framework-independent library for MoE load balancing:
+EvenMoE is a framework-independent library for MoE load balancing:
 
 - **L1 placement** decides which physical expert slots hold each logical expert's weights.
 - **L2 routing** selects a physical replica of the chosen logical expert for each token and, where the framework supports it, a destination rank for the shared expert.
-- **Framework integration** supplies model expert information and TopK results to MLB, exposes existing framework communication operations for aggregating load, and notifies MLB when the expert placement changes.
+- **Framework integration** supplies model expert information and TopK results to EvenMoE, exposes existing framework communication operations for aggregating load, and notifies EvenMoE when the expert placement changes.
 
 DeepSeek-V3 is the end-to-end example currently presented in the README. New model integrations should reuse these general capabilities.
 Supporting a model, implementing an algorithm, and running it in a framework are separate accomplishments that need separate explanations and validation.
@@ -22,7 +22,7 @@ If the existing interfaces cannot express a new capability, explain the gap and 
 
 | Contribution | Main implementation location | Minimum deliverables |
 |---|---|---|
-| Support a new model | Model and MoE integration in the framework; reuse existing MLB adapters and algorithms | Connect expert information, TopK routing, placement result handoff, and placement commit notifications; reuse existing integration where possible |
+| Support a new model | Model and MoE integration in the framework; reuse existing EvenMoE adapters and algorithms | Connect expert information, TopK routing, placement result handoff, and placement commit notifications; reuse existing integration where possible |
 | Add an L1 algorithm | `policies/l1/` and registration in the unified entry point | A `PlacementPlanner` implementation, placement mapping validity tests, and an algorithm description |
 | Add an L2 algorithm | `policies/l2/`, pipeline configuration, and the construction entry point | A `TokenRouter` implementation, capability declarations, and semantics and composition tests |
 | Add a framework or integration capability | `adapters/<framework>/` and the framework repository | Data conversion, lifecycle integration, framework versions, and validation across both repositories |
@@ -33,11 +33,11 @@ If the existing interfaces cannot express a new capability, explain the gap and 
 | File or directory | What to look for |
 |---|---|
 | [README.md](README.md) | Project scope, current usage, installation, and reported validation results |
-| [core/types.py](src/moe_load_balancer/core/types.py) | The actual fields and semantics of requests, plans, snapshots, and decisions |
-| [core/l1.py](src/moe_load_balancer/core/l1.py), [core/l2.py](src/moe_load_balancer/core/l2.py) | L1/L2 protocols and the collective abstraction |
-| [core/orchestrator.py](src/moe_load_balancer/core/orchestrator.py) | `MoELoadBalancer` construction, algorithm calls, and placement notifications |
-| [core/routing_pipeline.py](src/moe_load_balancer/core/routing_pipeline.py) | Algorithm expressions, composition rules, capabilities, and applicability |
-| [adapters/sglang/](src/moe_load_balancer/adapters/sglang/), [adapters/vllm/](src/moe_load_balancer/adapters/vllm/) | Framework boundaries and data conversion |
+| [core/types.py](src/evenmoe/core/types.py) | The actual fields and semantics of requests, plans, snapshots, and decisions |
+| [core/l1.py](src/evenmoe/core/l1.py), [core/l2.py](src/evenmoe/core/l2.py) | L1/L2 protocols and the collective abstraction |
+| [core/orchestrator.py](src/evenmoe/core/orchestrator.py) | `MoELoadBalancer` construction, algorithm calls, and placement notifications |
+| [core/routing_pipeline.py](src/evenmoe/core/routing_pipeline.py) | Algorithm expressions, composition rules, capabilities, and applicability |
+| [adapters/sglang/](src/evenmoe/adapters/sglang/), [adapters/vllm/](src/evenmoe/adapters/vllm/) | Framework boundaries and data conversion |
 | [tests/](tests/), [CI configuration](.github/workflows/ci.yml) | Existing behavioral contracts and automated checks |
 
 ## 4. Design constraints
@@ -45,21 +45,21 @@ If the existing interfaces cannot express a new capability, explain the gap and 
 ### 4.1 Module responsibilities: where code belongs
 
 The five areas below—**Framework, Adapter, Core, Policy, and Kernels**—describe responsibilities, code locations, examples, and work that belongs elsewhere.
-Paths below are relative to `src/moe_load_balancer/`. "Framework code" means code in the SGLang, vLLM, or other framework repository.
+Paths below are relative to `src/evenmoe/`. "Framework code" means code in the SGLang, vLLM, or other framework repository.
 
-**Framework: decide when to call MLB and apply its results during model execution.**
+**Framework: decide when to call EvenMoE and apply its results during model execution.**
 
 - **Responsibilities**: Run the model, provide load data, decide when to rebalance experts, manage communication groups, move expert weights, and update the expert mappings used for execution.
-- **Location**: The framework's model execution, MoE layers, and load-balancing integration code. "Glue" refers to the code that calls MLB from these locations.
-- **Example**: The framework decides to rebalance and calls MLB for a new placement. After moving weights and completing the required synchronization, it updates the mappings and notifies MLB to refresh algorithm state that depends on the placement.
-- **Keep elsewhere**: Do not duplicate an algorithm's solver or routing logic in the framework for each new integration. These implementations belong in MLB policies.
+- **Location**: The framework's model execution, MoE layers, and load-balancing integration code. "Glue" refers to the code that calls EvenMoE from these locations.
+- **Example**: The framework decides to rebalance and calls EvenMoE for a new placement. After moving weights and completing the required synchronization, it updates the mappings and notifies EvenMoE to refresh algorithm state that depends on the placement.
+- **Keep elsewhere**: Do not duplicate an algorithm's solver or routing logic in the framework for each new integration. These implementations belong in EvenMoE policies.
 
-**Adapter: connect existing framework data and operations to MLB interfaces.**
+**Adapter: connect existing framework data and operations to EvenMoE interfaces.**
 
-- **Responsibilities**: Read model information and current expert mappings from the framework to construct MLB requests and snapshots; convert MLB results into framework formats; wrap existing framework communication operations behind interfaces MLB can call.
+- **Responsibilities**: Read model information and current expert mappings from the framework to construct EvenMoE requests and snapshots; convert EvenMoE results into framework formats; wrap existing framework communication operations behind interfaces EvenMoE can call.
 - **Location**: The corresponding framework directory, such as `adapters/sglang/` or `adapters/vllm/`.
-- **Example**: SGLang's `to_placement_snapshot()` converts the currently committed mappings into an MLB `PlacementSnapshot`; `to_sglang_maps()` converts a candidate plan into SGLang mapping formats.
-- **Division of responsibility**: The adapter handles data conversion and interface integration. Policies make balancing decisions. The adapter reads the framework's committed expert mappings and converts them into MLB's format.
+- **Example**: SGLang's `to_placement_snapshot()` converts the currently committed mappings into an EvenMoE `PlacementSnapshot`; `to_sglang_maps()` converts a candidate plan into SGLang mapping formats.
+- **Division of responsibility**: The adapter handles data conversion and interface integration. Policies make balancing decisions. The adapter reads the framework's committed expert mappings and converts them into EvenMoE's format.
 
 **Core: provide public interfaces and coordinate algorithm calls.**
 
@@ -84,15 +84,15 @@ Paths below are relative to `src/moe_load_balancer/`. "Framework code" means cod
 
 **Use the following division of responsibility for operations spanning modules.**
 
-- **Communication**: The adapter wraps framework communication operations needed by L2 behind a common interface that MLB can call, for example to aggregate load across GPUs.
-- **Weight movement and placement activation**: The framework determines when to move weights and handles synchronization and the final placement switch. The SGLang adapter's `commit_placement()` notifies MLB after the framework has moved weights and switched the placement; it does not move weights on the framework's behalf.
+- **Communication**: The adapter wraps framework communication operations needed by L2 behind a common interface that EvenMoE can call, for example to aggregate load across GPUs.
+- **Weight movement and placement activation**: The framework determines when to move weights and handles synchronization and the final placement switch. The SGLang adapter's `commit_placement()` notifies EvenMoE after the framework has moved weights and switched the placement; it does not move weights on the framework's behalf.
 
 For example, an L1 update proceeds in this order:
 
 1. The framework decides to rebalance and prepares load data; the adapter converts it into a `PlacementRequest`.
 2. Core calls the L1 policy to obtain a candidate `PlacementPlan`. The model still uses the old placement at this point.
 3. The adapter converts the plan's format; the framework moves weights, synchronizes, and switches mappings.
-4. The adapter constructs a snapshot from the committed placement and notifies MLB to refresh algorithm state. Subsequent L2 routing uses this placement.
+4. The adapter constructs a snapshot from the committed placement and notifies EvenMoE to refresh algorithm state. Subsequent L2 routing uses this placement.
 
 **Determine the scope of changes from the contribution type:**
 
@@ -105,50 +105,50 @@ For example, an L1 update proceeds in this order:
 
 ## 5. Add model support: DeepSeek-V3.2 as an example
 
-Check three integration points when adding a model: **expert information, TopK routing, and placement result handoff and commit notifications**. Reuse existing integration where it supports the model; otherwise, update the relevant SGLang integration or MLB adapter.
-This example uses the [SGLang branch with MLB integration](https://github.com/xutizhou/sglang-moe-lb-waterfill-dev/tree/e4189e8fac9c53b6698c23c1411d148350ae0137) and the [MLB implementation](https://github.com/ai-dynamo/moe-load-balancer/tree/main). SGLang paths are relative to `python/sglang/srt/`; MLB paths are relative to `src/moe_load_balancer/`.
+Check three integration points when adding a model: **expert information, TopK routing, and placement result handoff and commit notifications**. Reuse existing integration where it supports the model; otherwise, update the relevant SGLang integration or EvenMoE adapter.
+This example uses the [SGLang branch with EvenMoE integration](https://github.com/xutizhou/sglang-moe-lb-waterfill-dev/tree/e4189e8fac9c53b6698c23c1411d148350ae0137) and the [EvenMoE implementation](https://github.com/ai-dynamo/evenmoe/tree/main). SGLang paths are relative to `python/sglang/srt/`; EvenMoE paths are relative to `src/evenmoe/`.
 
-### 5.1 Expert information: can the model's expert layout reach MLB?
+### 5.1 Expert information: can the model's expert layout reach EvenMoE?
 
 **Where to check:**
 
 - The SGLang model's `get_model_config_for_expert_location()`: does it provide the correct layer count, logical expert count, and expert group count?
 - SGLang's `model_executor/model_runner.py`: does it populate `context.resources.mlb_model_info` with the expert information?
-- MLB's `adapters/sglang/placement.py`: can it construct placement requests and snapshots from this information and the framework's per-layer mappings?
+- EvenMoE's `adapters/sglang/placement.py`: can it construct placement requests and snapshots from this information and the framework's per-layer mappings?
 
-**What to change:** If the model lacks the expert-information interface, implement it in the SGLang model class. Map differently named configuration fields in that interface. Changes to values such as the expert count usually do not require MLB changes. If expert counts differ by layer, the current shared model information cannot express them; extend both the per-layer information in SGLang context and the MLB adapter's per-layer reads.
+**What to change:** If the model lacks the expert-information interface, implement it in the SGLang model class. Map differently named configuration fields in that interface. Changes to values such as the expert count usually do not require EvenMoE changes. If expert counts differ by layer, the current shared model information cannot express them; extend both the per-layer information in SGLang context and the EvenMoE adapter's per-layer reads.
 
 **Why V3.2 needs no change:** `DeepseekV3ForCausalLM` and `DeepseekV32ForCausalLM` both inherit from `DeepseekV2ForCausalLM` and already share this interface. Their routed expert and group counts are also the same, so the expert-information and placement conversions can be reused.
 
-### 5.2 TopK routing: does the model use the existing MLB call path?
+### 5.2 TopK routing: does the model use the existing EvenMoE call path?
 
 **Where to check:**
 
-- SGLang's `layers/moe/topk.py::_apply_moe_load_balancer()` and `eplb/moe_load_balancer_glue.py::route_topk_with_mlb()`: after the model produces logical TopK results, does it call MLB through this path and pass the result to dispatch?
-- MLB's `adapters/sglang/routing.py`: can `to_routing_request()` and `to_sglang_routing_output()` convert the model's TopK results and correctly pass expert IDs, weights, and scaling factors?
+- SGLang's `layers/moe/topk.py::_apply_moe_load_balancer()` and `eplb/moe_load_balancer_glue.py::route_topk_with_mlb()`: after the model produces logical TopK results, does it call EvenMoE through this path and pass the result to dispatch?
+- EvenMoE's `adapters/sglang/routing.py`: can `to_routing_request()` and `to_sglang_routing_output()` convert the model's TopK results and correctly pass expert IDs, weights, and scaling factors?
 
 **What to change:** If the model uses a different TopK/dispatch path, add the `route_topk_with_mlb()` call in that SGLang path. If the result format differs, first convert it to the helper's `StandardTopKOutput` format. Extend the adapter only if it cannot express the required data. Preserve the model's expert selection and weight normalization.
 
-**Why V3.2 needs no change:** It reuses the existing MoE implementation and shared TopK path, which already calls MLB, with compatible input and output formats. No additional integration or model-specific L2 policy is needed.
+**Why V3.2 needs no change:** It reuses the existing MoE implementation and shared TopK path, which already calls EvenMoE, with compatible input and output formats. No additional integration or model-specific L2 policy is needed.
 
-### 5.3 Placement handoff: receive MLB results and notify MLB when they take effect
+### 5.3 Placement handoff: receive EvenMoE results and notify EvenMoE when they take effect
 
 **Where to check:**
 
-- MLB's `adapters/sglang/placement.py::to_sglang_maps()` and its SGLang callers: do they convert the L1 `PlacementPlan` into framework mappings and pass them to SGLang's existing placement update flow?
-- The same adapter's `commit_placement()` and its SGLang callers: do they notify MLB after the placement switch and read the committed placement through `to_placement_snapshot()`?
+- EvenMoE's `adapters/sglang/placement.py::to_sglang_maps()` and its SGLang callers: do they convert the L1 `PlacementPlan` into framework mappings and pass them to SGLang's existing placement update flow?
+- The same adapter's `commit_placement()` and its SGLang callers: do they notify EvenMoE after the placement switch and read the committed placement through `to_placement_snapshot()`?
 
 **What to change:** If the model uses a different placement update path, connect the placement result conversion and handoff, along with the notification after the switch. Reuse the shared path when it already covers the model.
 
-**Why V3.2 needs no change:** It uses the same placement representation and SGLang update flow. Both receiving MLB's placement results and notifying MLB after updates are already connected.
+**Why V3.2 needs no change:** It uses the same placement representation and SGLang update flow. Both receiving EvenMoE's placement results and notifying EvenMoE after updates are already connected.
 
-Once these three integration points are connected, reuse applicable L1/L2 algorithms. To use Waterfill, also check that SGLang can execute and combine shared-expert work across ranks according to MLB's `shared_expert_rank`. The presence of a shared expert in the model does not itself provide this integration.
+Once these three integration points are connected, reuse applicable L1/L2 algorithms. To use Waterfill, also check that SGLang can execute and combine shared-expert work across ranks according to EvenMoE's `shared_expert_rank`. The presence of a shared expert in the model does not itself provide this integration.
 
 ## 6. Add an L1 or L2 algorithm
 
 ### 6.1 Choose the directory and required interfaces
 
-Paths below are relative to `src/moe_load_balancer/`.
+Paths below are relative to `src/evenmoe/`.
 
 | Algorithm responsibility | New file location | Required implementation | Return value |
 |---|---|---|---|
@@ -156,18 +156,18 @@ Paths below are relative to `src/moe_load_balancer/`.
 | L2: choose an expert replica for each token | `policies/l2/<algorithm>.py` | `phase = RoutingPhase.PHYSICAL_ROUTING` and `route_tokens(request, policy)` | `RoutingDecision` with physical expert IDs and weights |
 | L2: choose a rank for shared-expert execution | `policies/l2/<algorithm>.py` | `phase = RoutingPhase.SHARED_EXPERT` and `route_tokens(request, policy)` | `RoutingDecision` preserving physical expert IDs and weights, with `shared_expert_rank` added |
 
-The interfaces are `PlacementPlanner` in [core/l1.py](src/moe_load_balancer/core/l1.py) and `TokenRouter` in [core/l2.py](src/moe_load_balancer/core/l2.py).
+The interfaces are `PlacementPlanner` in [core/l1.py](src/evenmoe/core/l1.py) and `TokenRouter` in [core/l2.py](src/evenmoe/core/l2.py).
 For a new L1 algorithm, explicitly inherit from `PlacementPlanner` and implement `plan()`.
 For a new L2 algorithm, explicitly inherit from `TokenRouter`, declare `phase`, and implement `route_tokens()`.
 Larger algorithms can be split into files in a directory with the algorithm's name.
 
-The following examples use the existing EPLB and Static implementations to explain the interfaces and call paths. Add new algorithms under MLB's `policies/`; once name parsing and instance creation are connected, the framework enables them by name.
+The following examples use the existing EPLB and Static implementations to explain the interfaces and call paths. Add new algorithms under EvenMoE's `policies/`; once name parsing and instance creation are connected, the framework enables them by name.
 
 ### 6.2 Add L1: implement plan and connect algorithm selection
 
 **Step 1: In `policies/l1/<algorithm>.py`, inherit from `PlacementPlanner` and implement `plan()`.**
 
-See [EPLBPlacementPlanner](src/moe_load_balancer/policies/l1/eplb/planner.py):
+See [EPLBPlacementPlanner](src/evenmoe/policies/l1/eplb/planner.py):
 
 ```python
 class EPLBPlacementPlanner(PlacementPlanner):
@@ -184,7 +184,7 @@ Implement the new placement logic in this method and return these fields:
 | `logical_to_all_physical_map` | Candidate physical slots for each logical expert; use `-1` for padding |
 | `logical_to_physical_count` | The number of valid physical replicas for each logical expert |
 
-**Step 2: Follow Section 6.4 to add the algorithm to MLB's default planner mapping.**
+**Step 2: Follow Section 6.4 to add the algorithm to EvenMoE's default planner mapping.**
 
 The framework selects a built-in algorithm through `PlacementRequest.policy`.
 `MoELoadBalancer.plan_placement()` finds the corresponding planner and calls its `plan()` method.
@@ -192,7 +192,7 @@ The framework selects a built-in algorithm through `PlacementRequest.policy`.
 **Step 3: Call the unified entry point. This example uses the existing `deepseek` algorithm.**
 
 ```python
-from moe_load_balancer import (
+from evenmoe import (
     MoELoadBalancer, PlacementRequest, PlacementStats, PlacementTopology,
 )
 
@@ -218,7 +218,7 @@ The result is a candidate placement. The framework activates it after loading or
 
 **Step 1: In `policies/l2/<algorithm>.py`, inherit from `TokenRouter`, declare `phase`, and implement `route_tokens()`.**
 
-The existing [StaticL2Router](src/moe_load_balancer/policies/l2/replica.py) uses this interface:
+The existing [StaticL2Router](src/evenmoe/policies/l2/replica.py) uses this interface:
 
 ```python
 class StaticL2Router(TokenRouter):
@@ -235,14 +235,14 @@ Implement a new physical-replica selection algorithm through the same interface.
 
 **Step 2: Follow Section 6.4 to connect the algorithm name, execution phase, capability declarations, and instance creation in `from_algorithm()`.**
 
-The framework constructs MLB with `MoELoadBalancer.from_algorithm("algorithm_name", ...)` during initialization.
+The framework constructs EvenMoE with `MoELoadBalancer.from_algorithm("algorithm_name", ...)` during initialization.
 Each `RoutingRequest` supplies the current batch's data and uses the algorithm selected at initialization.
 
 **Step 3: Call the unified entry point. This example uses the existing `static` algorithm.**
 
 ```python
 import torch
-from moe_load_balancer import MoELoadBalancer, PlacementSnapshot, RoutingRequest
+from evenmoe import MoELoadBalancer, PlacementSnapshot, RoutingRequest
 
 mlb = MoELoadBalancer.from_algorithm(
     "static",
@@ -276,10 +276,10 @@ After Step 2, replace the name passed to `from_algorithm()` with the new algorit
 **For a shared-expert algorithm, keep the method signature and change these three things:**
 
 1. Set `phase` to `RoutingPhase.SHARED_EXPERT`.
-2. When SGLang calls `mlb.route_tokens(request)`, it still supplies `request.logical_topk_ids`: the logical expert IDs selected by the model. Inside that call, MLB first determines physical IDs through the physical-replica routing policy, or the default mapping if none is configured, and prepares the routed-expert load for each rank. It then calls the shared-expert algorithm's `route_tokens()`. Read these prepared results from `request.routed_physical_topk_ids` and `request.routed_rank_load` to choose the shared-expert rank for each token. SGLang does not need to convert logical IDs to physical IDs before calling MLB.
+2. When SGLang calls `mlb.route_tokens(request)`, it still supplies `request.logical_topk_ids`: the logical expert IDs selected by the model. Inside that call, EvenMoE first determines physical IDs through the physical-replica routing policy, or the default mapping if none is configured, and prepares the routed-expert load for each rank. It then calls the shared-expert algorithm's `route_tokens()`. Read these prepared results from `request.routed_physical_topk_ids` and `request.routed_rank_load` to choose the shared-expert rank for each token. SGLang does not need to convert logical IDs to physical IDs before calling EvenMoE.
 3. Preserve the existing physical IDs and weights in `RoutingDecision`, and put each token's destination rank in `shared_expert_rank`.
 
-See [replica.py](src/moe_load_balancer/policies/l2/replica.py) and [waterfill.py](src/moe_load_balancer/policies/l2/waterfill.py) for existing implementations.
+See [replica.py](src/evenmoe/policies/l2/replica.py) and [waterfill.py](src/evenmoe/policies/l2/waterfill.py) for existing implementations.
 
 ### 6.4 Connect the algorithm to the repository's configuration entry points
 
@@ -289,7 +289,7 @@ Complete the relevant integration below so the framework can select the new L1 o
 |---|---|---|
 | Select L1 by name | `core/orchestrator.py` → `MoELoadBalancer.__init__()` | Import the new planner and add its name-to-instance mapping to the default `placement_planners`; use this name in `PlacementRequest.policy` |
 | Parse the L2 name and runtime requirements | `core/routing_pipeline.py` → `RoutingPipeline._from_string()`; update `is_applicable()` as needed | Recognize the new name, assign it to the correct execution phase, and declare the statistics, state, and runtime conditions it requires |
-| Create the implementation from the L2 name | `core/orchestrator.py` → `MoELoadBalancer.from_algorithm()` | Import the new router; instantiate it when its name is selected and add it to `routers`, so the factory returns a configured MLB instance |
+| Create the implementation from the L2 name | `core/orchestrator.py` → `MoELoadBalancer.from_algorithm()` | Import the new router; instantiate it when its name is selected and add it to `routers`, so the factory returns a configured EvenMoE instance |
 
 ## 7. Compare against a baseline and report performance
 
@@ -300,7 +300,7 @@ The report should explain where the change helps, the size of the benefit, its c
 
 | Change | Baseline | What to hold fixed |
 |---|---|---|
-| Integrate a new model | The same checkpoint on the framework's native execution path, compared with MLB enabled | Model, precision, hardware, and requests. Differences between V3 and V3.2 do not establish an MLB benefit. |
+| Integrate a new model | The same checkpoint on the framework's native execution path, compared with EvenMoE enabled | Model, precision, hardware, and requests. Differences between V3 and V3.2 do not establish an EvenMoE benefit. |
 | Add an L1 policy | An existing applicable L1 algorithm; optionally also report results without rebalancing | Load recordings, initial placement, replica budget, and L2. Each algorithm produces its own final placement. |
 | Add an L2 policy | An existing applicable router on the same placement, such as `static`, `dynamic`, or another target algorithm | Per-layer mappings and replica counts; change only L2 |
 | Optimize another execution path | The previous implementation of the same functionality | Inputs, output semantics, and runtime configuration |
@@ -385,7 +385,7 @@ performance-report/
 ## 8. PR completion criteria
 
 Keep a PR focused on one explainable behavior change. Contributors should describe the implementation's scope; maintainers review boundaries and evidence.
-If companion framework changes are required, describe the dependencies and a reproducible combination of both repositories. Merging MLB code does not by itself complete framework integration.
+If companion framework changes are required, describe the dependencies and a reproducible combination of both repositories. Merging EvenMoE code does not by itself complete framework integration.
 
 You can use this PR outline:
 

@@ -20,7 +20,7 @@ from dataclasses import asdict, dataclass, field
 import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from moe_load_balancer import (
+from evenmoe import (
     MoELoadBalancer,
     PlacementSnapshot,
     RoutingPolicyConfig,

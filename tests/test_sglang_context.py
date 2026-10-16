@@ -7,8 +7,8 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from moe_load_balancer import MoELoadBalancer, RoutingDecision
-from moe_load_balancer.adapters.sglang import (
+from evenmoe import MoELoadBalancer, RoutingDecision
+from evenmoe.adapters.sglang import (
     placement,
     to_load_balancer_kwargs,
     to_placement_request,
@@ -259,8 +259,8 @@ def test_explicit_placement_values_override_context_defaults(engine):
 
 
 def test_coupled_placement_uses_rank_and_preserves_quota(engine):
-    from moe_load_balancer import PlacementPlan
-    from moe_load_balancer.adapters.sglang import to_sglang_maps
+    from evenmoe import PlacementPlan
+    from evenmoe.adapters.sglang import to_sglang_maps
 
     _, ctx = engine
     ctx.config_bag("exec").moe.moe_load_balancer_algorithm = "ultraep"

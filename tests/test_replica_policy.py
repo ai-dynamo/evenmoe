@@ -6,13 +6,13 @@ from __future__ import annotations
 import pytest
 import torch
 
-from moe_load_balancer import (
+from evenmoe import (
     MoELoadBalancer,
     PlacementSnapshot,
     RoutingPolicyConfig,
     RoutingRequest,
 )
-from moe_load_balancer.policies.l2.replica import (
+from evenmoe.policies.l2.replica import (
     DynamicL2Router,
     StaticL2Router,
     route_dynamic_replicas,
@@ -273,7 +273,7 @@ class TestTheReplicaPoliciesDoWhatTheyAreNamedFor:
         return l2p, counts
 
     def test_static_sends_an_expert_to_exactly_one_replica(self):
-        from moe_load_balancer.adapters.vllm import nearest_replica_table
+        from evenmoe.adapters.vllm import nearest_replica_table
 
         l2p, counts = self._maps()
         torch.manual_seed(0)
@@ -290,7 +290,7 @@ class TestTheReplicaPoliciesDoWhatTheyAreNamedFor:
     def test_static_prefers_a_replica_the_rank_owns(self):
         """Pinning to a remote copy when a local one exists is the opposite of
         what this policy is for."""
-        from moe_load_balancer.adapters.vllm import nearest_replica_table
+        from evenmoe.adapters.vllm import nearest_replica_table
 
         l2p, counts = self._maps()
         per_rank = self.NP // self.EP

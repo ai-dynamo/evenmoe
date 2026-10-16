@@ -4,7 +4,7 @@
 """Do our L2 policies decide the same thing SGLang's do?
 
 `static`, `dynamic` and `lplb` exist on both runtimes under the same names, and
-the point of MLB is that they are the same algorithm either side of the
+the point of EvenMoE is that they are the same algorithm either side of the
 adapter. A policy reimplemented with a different tie-break is a different policy
 wearing a borrowed name, and every cross-runtime comparison of that row becomes
 meaningless -- which is exactly what had happened to `static`, whose map was
@@ -26,8 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import _sglang_reference as ref
 
-from moe_load_balancer.adapters.vllm import nearest_replica_table
-from moe_load_balancer.policies.l2.replica import (
+from evenmoe.adapters.vllm import nearest_replica_table
+from evenmoe.policies.l2.replica import (
     route_dynamic_random_replicas,
     route_static_replicas,
 )
@@ -125,7 +125,7 @@ def test_dynamic_random_draws_the_way_sglang_does():
 
 def test_dynamic_stays_deterministic_and_dynamic_random_does_not():
     """The reason both exist, asserted rather than left in a comment."""
-    from moe_load_balancer.policies.l2.replica import route_dynamic_replicas
+    from evenmoe.policies.l2.replica import route_dynamic_replicas
 
     cand, counts, _ = placement(64, 16)
     topk = torch.randint(0, 64, (256, 8), dtype=torch.int32)
@@ -158,9 +158,9 @@ def test_l1_and_lplb_are_the_same_code_on_both_runtimes():
     """
     import inspect
 
-    from moe_load_balancer.adapters.sglang import placement as sgl_placement
-    from moe_load_balancer.adapters.vllm import placement as vllm_placement
-    from moe_load_balancer.policies.l2 import lplb
+    from evenmoe.adapters.sglang import placement as sgl_placement
+    from evenmoe.adapters.vllm import placement as vllm_placement
+    from evenmoe.policies.l2 import lplb
 
     # L1: both adapters build a neutral request and hand it to one planner.
     def code_only(src):
@@ -205,9 +205,9 @@ def test_l1_placement_is_identical_through_both_adapters(num_nodes, num_groups):
     adapter passing them differently gets a different placement out of the same
     planner, and every cross-runtime row would then be comparing two layouts.
     """
-    from moe_load_balancer.adapters.sglang import to_placement_request as sgl_req
-    from moe_load_balancer.adapters.vllm import to_placement_request as vllm_req
-    from moe_load_balancer.core.orchestrator import MoELoadBalancer
+    from evenmoe.adapters.sglang import to_placement_request as sgl_req
+    from evenmoe.adapters.vllm import to_placement_request as vllm_req
+    from evenmoe.core.orchestrator import MoELoadBalancer
 
     torch.manual_seed(0)
     num_logical, num_redundant, ep_size = 64, 16, 8

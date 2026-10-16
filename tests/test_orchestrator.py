@@ -8,7 +8,7 @@ from dataclasses import replace
 import pytest
 import torch
 
-from moe_load_balancer import (
+from evenmoe import (
     MoELoadBalancer,
     PlacementPlan,
     PlacementRequest,
@@ -21,7 +21,7 @@ from moe_load_balancer import (
     RoutingRequest,
     RoutingStage,
 )
-from moe_load_balancer.kernels.ops.counting import count_routed_per_rank
+from evenmoe.kernels.ops.counting import count_routed_per_rank
 
 
 def _placement() -> PlacementSnapshot:
@@ -323,8 +323,8 @@ def test_global_waterfill_packs_rank_and_active_load_into_one_collective(monkeyp
 def test_global_rank_load_follows_the_policy_declaration_not_its_name(monkeypatch):
     """The orchestrator issues the rank-load collective for whichever policy
     declares ``rank_load="global"``; it never keys off the policy's name."""
-    from moe_load_balancer.core.policy import PolicyRegistry, RoutingPolicySpec
-    from moe_load_balancer.policies.registry import builtin_registry
+    from evenmoe.core.policy import PolicyRegistry, RoutingPolicySpec
+    from evenmoe.policies.registry import builtin_registry
 
     monkeypatch.delenv("WATERFILL_USE_GLOBAL_LOAD", raising=False)
     calls = []
@@ -689,7 +689,7 @@ def test_a_policy_that_never_declares_the_protocol_gets_no_count():
 def test_a_caller_supplied_count_is_never_re_gathered():
     """vLLM accumulates per-layer counts inside its CUDA graph and all-reduces
     once per step for every layer at once, because a collective cannot be
-    captured. MLB must pass that through, not issue a second one."""
+    captured. EvenMoE must pass that through, not issue a second one."""
     router = _CountDeclaringPhysicalRouter(needs=True)
     collectives = _RecordingCollectives(torch.tensor([1.0, 1.0]))
     supplied = torch.tensor([5.0, 7.0])

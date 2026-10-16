@@ -23,7 +23,7 @@ MAX_REPLICAS = EP_SIZE
 
 def _reroute(logical_topk_ids, replica_counts, rank_quota_prefix):
     """Run the vendored kernel and return the physical ids it chose."""
-    from moe_load_balancer.kernels.ultraep import UltraEPPlacementBackend
+    from evenmoe.kernels.ultraep import UltraEPPlacementBackend
 
     device = logical_topk_ids.device
     # One replica per rank, so a physical id doubles as the rank that holds it
@@ -46,8 +46,8 @@ def _reroute(logical_topk_ids, replica_counts, rank_quota_prefix):
 
 
 def _upstream_choice(ordinal: int, prefix: list[int], replica_count: int) -> int:
-    """Upstream's formula without the two cases MLB adds; the overflow tests
-    assert MLB departs from it."""
+    """Upstream's formula without the two cases EvenMoE adds; the overflow tests
+    assert EvenMoE departs from it."""
     idx = sum(1 for j in range(replica_count) if ordinal >= prefix[j])
     return min(idx, max(replica_count - 1, 0))
 

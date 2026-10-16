@@ -6,8 +6,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from moe_load_balancer import PlacementPlan, RoutingDecision, RoutingPolicyConfig
-from moe_load_balancer.adapters.sglang import (
+from evenmoe import PlacementPlan, RoutingDecision, RoutingPolicyConfig
+from evenmoe.adapters.sglang import (
     count_logical_experts,
     to_placement_request,
     to_placement_snapshot,

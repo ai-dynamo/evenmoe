@@ -6,19 +6,19 @@ from __future__ import annotations
 import pytest
 import torch
 
-from moe_load_balancer import (
+from evenmoe import (
     MoELoadBalancer,
     PlacementPolicyConfig,
     PlacementRequest,
     PlacementStats,
     PlacementTopology,
 )
-from moe_load_balancer.adapters.sglang import to_placement_request
-from moe_load_balancer.policies.l1.eplb.algorithms import (
+from evenmoe.adapters.sglang import to_placement_request
+from evenmoe.policies.l1.eplb.algorithms import (
     EplbAlgorithm,
     rebalance_experts,
 )
-from moe_load_balancer.policies.l1.eplb.planner import SUPPORTED_PLACEMENT_POLICIES
+from evenmoe.policies.l1.eplb.planner import SUPPORTED_PLACEMENT_POLICIES
 
 
 @pytest.mark.unit
