@@ -234,3 +234,9 @@ We thank DeepSeek for [EPLB](https://github.com/deepseek-ai/EPLB) and [LPLB](htt
 Licensed under [Apache-2.0](https://github.com/ai-dynamo/moe-load-balancer/blob/main/LICENSE). See [Third-Party Notices](https://github.com/ai-dynamo/moe-load-balancer/blob/main/THIRD_PARTY_NOTICES.md) for components adapted from DeepSeek, SGLang, and UltraEP.
 
 The UltraEP kernels under `src/moe_load_balancer/kernels/ultraep/` are adapted from [UltraEP](https://github.com/Dots-Infra/UltraEP). The upstream code stays under the MIT license in [LICENSE.ultraep](https://github.com/ai-dynamo/moe-load-balancer/blob/main/src/moe_load_balancer/kernels/ultraep/LICENSE.ultraep), and NVIDIA's modifications are under Apache-2.0. Each adapted file carries both notices in its header.
+
+## Notice and Disclaimer
+
+Installation retrieves NVIDIA MathDX through the declared `nvidia-mathdx` pip dependency.
+
+NOTICE AND DISCLAIMER: This software automatically retrieves, accesses or interacts with external materials. Those retrieved materials are not distributed with this software and are governed solely by separate terms, conditions and licenses. You are solely responsible for finding, reviewing and complying with all applicable terms, conditions, and licenses, and for verifying the security, integrity and suitability of any retrieved materials for your specific use case. This software is provided "AS IS", without warranty of any kind. The author makes no representations or warranties regarding any retrieved materials, and assumes no liability for any losses, damages, liabilities or legal consequences from your use or inability to use this software or any retrieved materials. Use this software and the retrieved materials at your own risk.
