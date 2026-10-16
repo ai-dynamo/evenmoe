@@ -5,10 +5,10 @@
 #        check_signoff.sh --range <base> <head> (CI: every non-merge commit in base..head)
 set -euo pipefail
 
-has_signoff() { grep -q '^Signed-off-by: ' "$1"; }
+has_signoff() { grep -q -E '^Signed-off-by: [^<[:space:]][^<]* <[^>[:space:]]+@[^>[:space:]]+>[[:space:]]*$' "$1"; }
 
 if [ "${1:-}" != "--range" ]; then
-    has_signoff "$1" || { echo "missing Signed-off-by, use git commit -s"; exit 1; }
+    has_signoff "$1" || { echo "missing Signed-off-by: Name <email>, use git commit -s"; exit 1; }
     exit 0
 fi
 
@@ -18,9 +18,10 @@ if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; t
 else
     range=("$base..$head")
 fi
+commits=$(git rev-list --no-merges "${range[@]}") || { echo "cannot resolve commit range ${range[*]}"; exit 1; }
 msg=$(mktemp); trap 'rm -f "$msg"' EXIT
 status=0
-for c in $(git rev-list --no-merges "${range[@]}"); do
+for c in $commits; do
     git log -1 --format=%B "$c" > "$msg"
     has_signoff "$msg" || { echo "missing Signed-off-by: $(git log -1 --format='%h %s' "$c")"; status=1; }
 done
