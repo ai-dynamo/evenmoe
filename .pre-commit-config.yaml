@@ -8,7 +8,7 @@ repos:
     hooks:
       - id: spdx-header
         name: SPDX header
-        entry: env SPDX_ALLOWED="Apache-2.0 MIT" tools/check_spdx.sh
+        entry: env SPDX_ALLOWED="Apache-2.0 MIT" tools/check_spdx.py
         language: system
         files: (\.(c|cc|cpp|h|hpp|cu|cuh|py|sh|go|rs|toml|ya?ml|in)|CMakeLists\.txt)$
         exclude: ^(third_party|vendor)/

@@ -42,7 +42,7 @@ jobs:
           git ls-files -z \
             | grep -z -E '(\.(c|cc|cpp|h|hpp|cu|cuh|py|sh|go|rs|toml|ya?ml|in)|CMakeLists\.txt)$' \
             | grep -z -v -E '^(third_party|vendor)/' \
-            | xargs -0 --no-run-if-empty tools/check_spdx.sh
+            | xargs -0 --no-run-if-empty tools/check_spdx.py
 
       - name: DCO sign-off
         if: github.event_name != 'workflow_dispatch'
