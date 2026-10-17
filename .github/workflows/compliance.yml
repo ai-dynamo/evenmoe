@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Compliance gate for a new ai-dynamo repo. Set SPDX_ALLOWED to the licenses OSRB approved.
+
+name: Compliance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  compliance:
+    runs-on: ubuntu-24.04
+    env:
+      SPDX_ALLOWED: "Apache-2.0 MIT"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Required files
+        run: |
+          status=0
+          for f in LICENSE SECURITY.md CONTRIBUTING.md CODE_OF_CONDUCT.md; do
+            [ -f "$f" ] || { echo "missing $f"; status=1; }
+          done
+          head -n 3 LICENSE | grep -q 'NVIDIA CORPORATION' || { echo "LICENSE lacks the NVIDIA copyright line"; status=1; }
+          exit $status
+
+      - name: SPDX headers
+        run: |
+          git ls-files -z \
+            | grep -z -E '(\.(c|cc|cpp|h|hpp|cu|cuh|py|sh|go|rs|toml|ya?ml|in)|CMakeLists\.txt)$' \
+            | grep -z -v -E '^(third_party|vendor)/' \
+            | xargs -0 --no-run-if-empty tools/check_spdx.py
+
+      - name: DCO sign-off
+        if: github.event_name != 'workflow_dispatch'
+        run: >-
+          tools/check_signoff.sh --range
+          "${{ github.event.pull_request.base.sha || github.event.before }}"
+          "${{ github.event.pull_request.head.sha || github.sha }}"
