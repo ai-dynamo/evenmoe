@@ -164,15 +164,15 @@ python -m pip install -e ./evenmoe --no-deps
 Start **EPLB + LPLB** on one node with eight GPUs (TP2 / DP4 / EP8):
 
 ```bash
-VLLM_MLB_L1_ALGORITHM=deepseek_hierarchical \
-VLLM_MLB_L2_ALGORITHM=lplb \
+VLLM_EVENMOE_L1_ALGORITHM=deepseek_hierarchical \
+VLLM_EVENMOE_L2_ALGORITHM=lplb \
 vllm serve /path/to/moe-checkpoint \
   --tensor-parallel-size 2 \
   --data-parallel-size 4 \
   --enable-expert-parallel \
   --all2all-backend deepep_high_throughput \
   --enable-eplb \
-  --eplb-config '{"policy":"mlb","use_async":false,"num_redundant_experts":32}' \
+  --eplb-config '{"policy":"evenmoe","use_async":false,"num_redundant_experts":32}' \
   --max-num-batched-tokens 4096 \
   --enforce-eager \
   --numa-bind
@@ -180,7 +180,7 @@ vllm serve /path/to/moe-checkpoint \
 
 Keep the launch flags and change the environment variables to select an algorithm:
 
-| Algorithm | `VLLM_MLB_L1_ALGORITHM` | `VLLM_MLB_L2_ALGORITHM` |
+| Algorithm | `VLLM_EVENMOE_L1_ALGORITHM` | `VLLM_EVENMOE_L2_ALGORITHM` |
 |:---|:---|:---|
 | EPLB with vLLM's native uniform replica routing | `deepseek_hierarchical` | Empty (`""`) |
 | Static EPLB (deterministic replica rule) | `deepseek_hierarchical` | `static` |
@@ -196,22 +196,22 @@ Waterfill requires a supported shared-expert model and an evenly divisible physi
 Start **UltraEP** on the same topology, refreshing every 8 representative prefill batches:
 
 ```bash
-VLLM_MLB_L1_ALGORITHM=ultraep \
-VLLM_MLB_L2_ALGORITHM=ultraep \
-MLB_ULTRAEP_REFRESH_INTERVAL=8 \
+VLLM_EVENMOE_L1_ALGORITHM=ultraep \
+VLLM_EVENMOE_L2_ALGORITHM=ultraep \
+EVENMOE_ULTRAEP_REFRESH_INTERVAL=8 \
 vllm serve /path/to/moe-checkpoint \
   --tensor-parallel-size 2 \
   --data-parallel-size 4 \
   --enable-expert-parallel \
   --all2all-backend deepep_high_throughput \
   --enable-eplb \
-  --eplb-config '{"policy":"mlb","use_async":false,"num_redundant_experts":32}' \
+  --eplb-config '{"policy":"evenmoe","use_async":false,"num_redundant_experts":32}' \
   --max-num-batched-tokens 4096 \
   --enforce-eager \
   --numa-bind
 ```
 
-UltraEP re-solves placement and replica quotas every `MLB_ULTRAEP_REFRESH_INTERVAL` representative prefill batches (default 64), moving only the replica slots that changed. `MLB_ULTRAEP_MOVER` selects the weight transfer: `direct` (default, pairwise send/recv), `symm` (one-sided puts through torch symmetric memory, for an EP group inside one NVLink domain), or `auto`. `MLB_ULTRAEP_LAGGED_APPLY=1` applies each refresh on the layer's next forward, trading one step of staleness for the per-layer device sync; off by default. The kernels compile on first use on Hopper and Blackwell.
+UltraEP re-solves placement and replica quotas every `EVENMOE_ULTRAEP_REFRESH_INTERVAL` representative prefill batches (default 64), moving only the replica slots that changed. `EVENMOE_ULTRAEP_MOVER` selects the weight transfer: `direct` (default, pairwise send/recv), `symm` (one-sided puts through torch symmetric memory, for an EP group inside one NVLink domain), or `auto`. `EVENMOE_ULTRAEP_LAGGED_APPLY=1` applies each refresh on the layer's next forward, trading one step of staleness for the per-layer device sync; off by default. The kernels compile on first use on Hopper and Blackwell.
 
 ## Roadmap
 
