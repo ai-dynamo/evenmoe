@@ -1,0 +1,188 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# GPU CI: CUDA kernel tests + integration tests on the ai-dynamo self-hosted
+# GPU runners (the same ARC runner pools ai-dynamo/dynamo uses).
+#
+# Self-hosted runners must never execute unvetted code, so this workflow does
+# not trigger on pull_request. copy-pr-bot mirrors a PR to pull-request/<N>
+# once it is trusted (org member + signed commits) or a maintainer comments
+# "/ok to test <sha>"; that push runs this workflow and the status is reported
+# back to the PR because the commit SHA is the same.
+
+name: GPU CI
+
+on:
+  push:
+    branches:
+      - main
+      - "pull-request/[0-9]+"
+      # TEMP: lets ci-pipeline pushes run this workflow before it lands on main.
+      # Remove before merging.
+      - "ci-pipeline"
+  workflow_dispatch:
+
+concurrency:
+  # One run per PR mirror branch; keep every run on main.
+  group: ${{ github.workflow }}-${{ github.ref_name == 'main' && github.run_id || github.ref_name }}
+  cancel-in-progress: ${{ github.ref_name != 'main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # ------------------------------------------------------------------
+  # Skip GPU work for PRs that only touch docs. Runs on main and manual
+  # dispatches always run everything.
+  # ------------------------------------------------------------------
+  changed-files:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      gpu: ${{ steps.changes.outputs.gpu }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Detect GPU-relevant changes
+        id: changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$REF_NAME" =~ ^pull-request/([0-9]+)$ ]]; then
+            echo "gpu=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base=$(gh pr view "${BASH_REMATCH[1]}" --repo "$REPOSITORY" --json baseRefName -q '.baseRefName')
+          # The Compare API returns the true merge-base, not the base branch tip.
+          files=$(gh api --paginate "repos/$REPOSITORY/compare/$base...$HEAD_SHA" --jq '.files[].filename')
+          echo "Changed files against $base:"
+          echo "$files"
+          if grep -q -E '^(src/|tests/|pyproject\.toml$|setup\.py$|\.github/workflows/gpu-ci\.yml$)' <<< "$files"; then
+            echo "gpu=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "gpu=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ------------------------------------------------------------------
+  # CUDA kernel tests (requires GPU)
+  # ------------------------------------------------------------------
+  cuda-tests:
+    name: CUDA kernel tests
+    needs: [changed-files]
+    if: needs.changed-files.outputs.gpu == 'true'
+    # Single-GPU tester pool shared with ai-dynamo/dynamo (see its pr.yaml).
+    runs-on: prod-tester-amd-gpu-v2
+    timeout-minutes: 45
+    container:
+      # torch>=2.5 is required; 25.01 ships torch 2.6.
+      image: nvcr.io/nvidia/pytorch:25.01-py3
+      env:
+        # The ARC k8s runner runs the job pod as uid 1001, which has no home
+        # directory or passwd entry in the image. Point HOME at the workspace
+        # so pip/triton caches are writable and set USER for getpass.getuser().
+        HOME: /__w/evenmoe/evenmoe
+        USER: evenmoe
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Show GPU info
+        run: nvidia-smi
+
+      # A venv layered on the image's site-packages reuses its torch and works
+      # whatever uid the job runs as.
+      - name: Install project
+        run: |
+          set -euo pipefail
+          python -m venv --system-site-packages "$HOME/.venv"
+          echo "$HOME/.venv/bin" >> "$GITHUB_PATH"
+          "$HOME/.venv/bin/python" -m pip install --upgrade pip
+          "$HOME/.venv/bin/python" -m pip install pytest pytest-cov pytest-timeout
+          "$HOME/.venv/bin/python" -m pip install -e .
+
+      - name: Run CUDA kernel tests
+        run: |
+          python -m pytest tests/test_lplb_cuda_kernels.py \
+                           tests/test_ultraep_cuda_backend.py \
+                           tests/test_lplb_fixed_shape.py \
+                           -v --tb=short --timeout=120 \
+                           --junitxml=cuda-report.xml
+
+      - name: Upload CUDA test report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cuda-test-results
+          path: cuda-report.xml
+          if-no-files-found: ignore
+
+  # ------------------------------------------------------------------
+  # Integration tests (requires GPU) — mark=integration minus the CUDA
+  # kernel files cuda-tests already covers
+  # ------------------------------------------------------------------
+  integration-tests:
+    name: Integration tests
+    needs: [changed-files]
+    if: needs.changed-files.outputs.gpu == 'true'
+    runs-on: prod-tester-amd-gpu-v2
+    timeout-minutes: 60
+    container:
+      image: nvcr.io/nvidia/pytorch:25.01-py3
+      env:
+        HOME: /__w/evenmoe/evenmoe
+        USER: evenmoe
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Show GPU info
+        run: nvidia-smi
+
+      - name: Install project
+        run: |
+          set -euo pipefail
+          python -m venv --system-site-packages "$HOME/.venv"
+          echo "$HOME/.venv/bin" >> "$GITHUB_PATH"
+          "$HOME/.venv/bin/python" -m pip install --upgrade pip
+          "$HOME/.venv/bin/python" -m pip install pytest pytest-cov pytest-timeout
+          "$HOME/.venv/bin/python" -m pip install -e .
+
+      - name: Run integration tests
+        run: |
+          python -m pytest -m integration \
+                           --ignore=tests/test_lplb_cuda_kernels.py \
+                           --ignore=tests/test_ultraep_cuda_backend.py \
+                           --ignore=tests/test_lplb_fixed_shape.py \
+                           -v --tb=short --timeout=180 \
+                           --junitxml=integration-report.xml
+
+      - name: Upload integration test report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: integration-test-results
+          path: integration-report.xml
+          if-no-files-found: ignore
+
+  # Single required check for branch protection: passes when every GPU job
+  # succeeded or was skipped because the PR touched no GPU-relevant files.
+  gpu-ci-status-check:
+    name: GPU CI status
+    runs-on: ubuntu-24.04
+    needs: [changed-files, cuda-tests, integration-tests]
+    if: always()
+    steps:
+      - name: Check all dependent jobs
+        run: |
+          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
