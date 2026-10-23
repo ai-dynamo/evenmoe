@@ -164,15 +164,27 @@ jobs:
                            --ignore=tests/test_lplb_cuda_kernels.py \
                            --ignore=tests/test_ultraep_cuda_backend.py \
                            --ignore=tests/test_lplb_fixed_shape.py \
+                           --ignore=tests/test_e2e_pipeline.py \
                            -v --tb=short --timeout=180 \
                            --junitxml=integration-report.xml
+
+      # L1 placement -> commit -> L2 routing at DeepSeek-V3 scale. The first
+      # LPLB case NVRTC-compiles its LP shape set, hence the longer timeout.
+      - name: Run end-to-end pipeline tests
+        if: ${{ !cancelled() }}
+        run: |
+          python -m pytest tests/test_e2e_pipeline.py \
+                           -v -s -rs --tb=short --timeout=600 \
+                           --junitxml=e2e-report.xml
 
       - name: Upload integration test report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: integration-test-results
-          path: integration-report.xml
+          path: |
+            integration-report.xml
+            e2e-report.xml
           if-no-files-found: ignore
 
   # Single required check for branch protection: passes when every GPU job
