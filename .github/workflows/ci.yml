@@ -1,20 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Simplified pre-merge gate: lint + type check + unit tests + build smoke.
-# Single file, no reusable workflow, no change-set classification, no aggregate
-# status job. The full gate lives in ci.yml; this file is for fast iteration.
+# Pre-merge gate: lint + type check + unit tests + build smoke.
+# Runs on GitHub-hosted runners (no GPU), so it is safe to run on every PR,
+# including forks. GPU tests live in gpu-ci.yml and run only after copy-pr-bot
+# mirrors a vetted PR to a pull-request/<N> branch.
 
 name: CI
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
   pull_request:
   workflow_dispatch:
 
 # Cancel stale runs on the same PR; keep runs on main as the record of what shipped.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.event.pull_request.number) || format('{0}-{1}', github.workflow, github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -55,7 +58,14 @@ jobs:
         run: python -m mypy src/evenmoe
 
       - name: Unit tests
-        run: python -m pytest -m "not integration"
+        run: python -m pytest -m "not integration" --junitxml=unit-report.xml
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: unit-test-py${{ matrix.python-version }}
+          path: unit-report.xml
 
   build:
     name: Build and smoke
@@ -82,6 +92,17 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --force-reinstall --no-deps dist/*.whl
-          # Resolve the package from site-packages, not the checkout.
           cd /tmp
           python -c "import evenmoe; print('wheel import OK:', evenmoe.__name__)"
+
+  # Single required check for branch protection; matrix job names change with
+  # the Python versions, this one does not.
+  ci-status-check:
+    name: CI status
+    runs-on: ubuntu-24.04
+    needs: [test, build]
+    if: always()
+    steps:
+      - name: Check all dependent jobs
+        run: |
+          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
