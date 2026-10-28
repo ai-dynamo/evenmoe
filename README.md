@@ -44,6 +44,8 @@ Support below refers to EvenMoE's `main`-branch adapters; serving requires the c
 | | UltraEP | ✅ | ✅ |
 | **L2 · Token routing** | Static (deterministic replica rule) | ✅ | ✅ |
 | | LPLB | ✅ | ✅ |
+| | METRO | ✅ | ✅ |
+| | METRO-repair | ✅ | — |
 | | Waterfill | ✅ | ✅ |
 | | UltraEP | ✅ | ✅ |
 | | LPLB + Waterfill | ✅ | ✅ |
@@ -150,7 +152,7 @@ Keep the launch flags and change the two selectors to switch algorithms:
 | UltraEP | `auto` | `ultraep` |
 | UltraEP + Waterfill | `auto` | `ultraep+waterfill` |
 
-LPLB requires redundant replicas (`--ep-num-redundant-experts > 0`) and a recorded placement passed via `--init-expert-location` (produced once with `--enable-eplb`). Waterfill requires a shared-expert model. To run Waterfill without periodic EPLB, drop `--enable-eplb`/`--eplb-algorithm`, select `waterfill`, and retain DeepEP.
+LPLB requires redundant replicas (`--ep-num-redundant-experts > 0`) and a recorded placement passed via `--init-expert-location` (produced once with `--enable-eplb`). [METRO](https://arxiv.org/abs/2512.09277) assigns each decode step's active replicated experts to ranks so every rank reads as few distinct expert weights as possible, and routes prefill and mixed steps with the static replica rule. It has been validated only on a fixed placement: keep `--ep-num-redundant-experts` and `--init-expert-location`, drop `--enable-eplb`, select `metro`, and retain DeepEP. `metro_repair` has the same requirements and flags; it starts from METRO's assignment and runs a bounded repair (at most 32 single-expert moves, direct or through one intermediate rank, stopping at the lower bound `max(⌈active/ranks⌉, forced single-copy load)`), so its busiest rank never reads more distinct active experts than under METRO. Waterfill requires a shared-expert model. To run Waterfill without periodic EPLB, drop `--enable-eplb`/`--eplb-algorithm`, select `waterfill`, and retain DeepEP.
 
 ### vLLM
 
@@ -191,7 +193,7 @@ Keep the launch flags and change the environment variables to select an algorith
 | UltraEP + Waterfill | `ultraep` | `ultraep+waterfill` |
 | UltraEP placement with static routing | `ultraep` | `static` |
 
-Waterfill requires a supported shared-expert model and an evenly divisible physical-expert layout; the branch enables shared-expert fusion when Waterfill is selected. LPLB and UltraEP require redundant experts. Keep `use_async` set to `false` and `--enforce-eager`. `--numa-bind` pins each engine to its GPU's CPU socket and is recommended on two-socket nodes. For a periodic re-fit (`"step_interval"` below 1000) also set `"window_size"` to the same value.
+Waterfill requires a supported shared-expert model and an evenly divisible physical-expert layout; the branch enables shared-expert fusion when Waterfill is selected. LPLB, METRO and UltraEP require redundant experts. METRO acts on decode steps, so decode with `deepep_low_latency`, and set `MLB_FRESH_COUNTS=1` so every layer routes on the current step's expert counts rather than the previous step's. It has been validated only on a fixed placement: load one with `"init_placement_path"` and set a `"step_interval"` that is never reached. Keep `use_async` set to `false` and `--enforce-eager`. `--numa-bind` pins each engine to its GPU's CPU socket and is recommended on two-socket nodes. For a periodic re-fit (`"step_interval"` below 1000) also set `"window_size"` to the same value.
 
 Start **UltraEP** on the same topology, refreshing every 8 representative prefill batches:
 
