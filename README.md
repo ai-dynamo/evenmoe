@@ -44,12 +44,15 @@ Support below refers to EvenMoE's `main`-branch adapters; serving requires the c
 | | UltraEP | ✅ | ✅ |
 | **L2 · Token routing** | Static (deterministic replica rule) | ✅ | ✅ |
 | | LPLB | ✅ | ✅ |
+| | METRO | ✅ | ✅¹ |
 | | Waterfill | ✅ | ✅ |
 | | UltraEP | ✅ | ✅ |
 | | LPLB + Waterfill | ✅ | ✅ |
 | | UltraEP + Waterfill | ✅ | ✅ |
 
 Compose L2 policies with `+`, for example `lplb+waterfill` or `ultraep+waterfill`, subject to the framework support above.
+
+¹ METRO acts on decode steps and needs the vLLM integration's METRO decode-routing fixes. In vLLM it helps only at small decode batches: on DeepSeek-V3 EP8 (H20) with 64 redundant experts it lowered TPOT by 4.4% at 1 request per rank and raised it from 16 requests per rank. See [vLLM](#vllm).
 
 ## Performance
 
@@ -149,8 +152,9 @@ Keep the launch flags and change the two selectors to switch algorithms:
 | EPLB + LPLB + Waterfill | `auto` | `lplb+waterfill` |
 | UltraEP | `auto` | `ultraep` |
 | UltraEP + Waterfill | `auto` | `ultraep+waterfill` |
+| METRO on a fixed placement (drop `--enable-eplb`) | *(omit)* | `metro` |
 
-LPLB requires redundant replicas (`--ep-num-redundant-experts > 0`) and a recorded placement passed via `--init-expert-location` (produced once with `--enable-eplb`). Waterfill requires a shared-expert model. To run Waterfill without periodic EPLB, drop `--enable-eplb`/`--eplb-algorithm`, select `waterfill`, and retain DeepEP.
+LPLB requires redundant replicas (`--ep-num-redundant-experts > 0`) and a recorded placement passed via `--init-expert-location` (produced once with `--enable-eplb`). [METRO](https://arxiv.org/abs/2512.09277) assigns each decode step's active replicated experts to ranks so every rank reads as few distinct expert weights as possible, and routes prefill and mixed steps with the static replica rule. It has been validated only on a fixed placement: keep `--ep-num-redundant-experts` and `--init-expert-location`, drop `--enable-eplb`, select `metro`, and retain DeepEP. Waterfill requires a shared-expert model. To run Waterfill without periodic EPLB, drop `--enable-eplb`/`--eplb-algorithm`, select `waterfill`, and retain DeepEP.
 
 ### vLLM
 
@@ -190,8 +194,9 @@ Keep the launch flags and change the environment variables to select an algorith
 | UltraEP | `ultraep` | `ultraep` |
 | UltraEP + Waterfill | `ultraep` | `ultraep+waterfill` |
 | UltraEP placement with static routing | `ultraep` | `static` |
+| METRO on a fixed placement | `deepseek_hierarchical` | `metro` |
 
-Waterfill requires a supported shared-expert model and an evenly divisible physical-expert layout; the branch enables shared-expert fusion when Waterfill is selected. LPLB and UltraEP require redundant experts. Keep `use_async` set to `false` and `--enforce-eager`. `--numa-bind` pins each engine to its GPU's CPU socket and is recommended on two-socket nodes. For a periodic re-fit (`"step_interval"` below 1000) also set `"window_size"` to the same value.
+Waterfill requires a supported shared-expert model and an evenly divisible physical-expert layout; the branch enables shared-expert fusion when Waterfill is selected. LPLB, METRO and UltraEP require redundant experts. METRO acts on decode steps, so decode with `deepep_low_latency`, and set `EVENMOE_FRESH_COUNTS=1` so every layer routes on the current step's expert counts rather than the previous step's. It has been validated only on a fixed placement: load one with `"init_placement_path"` and set a `"step_interval"` that is never reached. Unlike in SGLang, the per-layer count, all-reduce and route before dispatch are not overlapped with the shared-expert GEMM, so METRO pays off only at small decode batches. Keep `use_async` set to `false` and `--enforce-eager`. `--numa-bind` pins each engine to its GPU's CPU socket and is recommended on two-socket nodes. For a periodic re-fit (`"step_interval"` below 1000) also set `"window_size"` to the same value.
 
 Start **UltraEP** on the same topology, refreshing every 8 representative prefill batches:
 
@@ -216,7 +221,7 @@ UltraEP re-solves placement and replica quotas every `EVENMOE_ULTRAEP_REFRESH_IN
 ## Roadmap
 
 - [x] Extend prefill-phase algorithm support to DeepSeek-V4, GLM, and Qwen models (see [Supported Models](#supported-models)).
-- [ ] Add decode-phase support with the Metro algorithm.
+- [x] Add decode-phase support with the METRO algorithm.
 - [ ] Add more prefill-phase algorithms, including MoonEP.
 - [ ] Support MCore training.
 - [ ] Integrate with TensorRT-LLM (TRT-LLM).
