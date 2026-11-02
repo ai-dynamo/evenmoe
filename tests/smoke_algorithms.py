@@ -174,6 +174,8 @@ CASES = [
     ("dynamic+waterfill", "dynamic+waterfill", {}),
     ("lplb+waterfill", "lplb+waterfill", {}),
     ("metro", "metro", {}),
+    ("tile_repair", "tile_repair", {}),
+    ("tile_repair+waterfill", "tile_repair+waterfill", {}),
     ("fake", "fake", {}),
     ("fake+static", "fake+static", {}),
     ("fake+lplb", "fake+lplb", {}),
