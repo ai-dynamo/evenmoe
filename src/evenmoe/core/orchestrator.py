@@ -394,7 +394,8 @@ class MoELoadBalancer:
         counting would buy an EP collective per layer per forward whose result
         is discarded.
 
-        Whether the count is the EP-wide sum or this rank's own histogram is
+        Whether the count is the EP-wide sum, every source rank's row
+        (``[ep_size, num_logical]``), or this rank's own histogram is
         the policy's declaration (``RoutingPolicySpec.logical_count``), not an
         orchestrator decision.
 
@@ -410,6 +411,8 @@ class MoELoadBalancer:
         if not router.needs_global_logical_count(request):
             return None
         spec = self._policy_spec(policy)
+        if spec is not None and spec.logical_count == "per_rank":
+            return self._per_rank_logical_count(request)
         use_local_count = spec is not None and spec.logical_count == "local"
         return self._logical_count(request, use_local_count=use_local_count)
 
@@ -430,6 +433,36 @@ class MoELoadBalancer:
         if use_local_count:
             return local_count
         return self._all_reduce_sum(local_count, request.placement.ep_size)
+
+    def _per_rank_logical_count(self, request: RoutingRequest) -> object:
+        """Gather every source rank's per-logical count as ``[ep_size, num_logical]``.
+
+        An all-gather expressed as one sum all-reduce, so it reuses the
+        framework's (graph-capturable) all-reduce: each rank writes its own
+        histogram into its row of a zeroed payload.
+        """
+
+        if request.placement is None:
+            raise ValueError("Logical-count routing requires a committed placement.")
+        import torch
+
+        from evenmoe.kernels.ops.counting import count_logical_experts
+
+        placement = request.placement
+        local_count = count_logical_experts(
+            request.logical_topk_ids, placement.num_logical_experts
+        )
+        world_size = placement.ep_size
+        rank = 0 if world_size == 1 and self._collectives is None else self._collective_rank()
+        if not 0 <= rank < world_size:
+            raise ValueError("Routing collective rank is outside the placement EP group.")
+        payload = torch.zeros(
+            (world_size, placement.num_logical_experts),
+            dtype=local_count.dtype,
+            device=local_count.device,
+        )
+        payload[rank].copy_(local_count)
+        return self._all_reduce_sum(payload, world_size)
 
     def _global_rank_load(
         self,

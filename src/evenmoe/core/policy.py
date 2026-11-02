@@ -19,6 +19,7 @@ from evenmoe.core.l2 import TokenRouter
 from evenmoe.core.types import RoutingPhase, RoutingPolicyConfig, TensorLike
 
 _DATA_VIEWS = (None, "local", "global")
+_LOGICAL_COUNT_VIEWS = (*_DATA_VIEWS, "per_rank")
 _GRAPH_STABILITIES = ("stable", "realloc_on_placement_change")
 
 
@@ -67,6 +68,11 @@ class RoutingCapabilities:
     collective per layer per forward. Read once by a framework adapter at
     configuration time; the orchestrator's per-request check of the same fact is
     :class:`~evenmoe.core.l2.GlobalLogicalCountConsumer`."""
+    consumes_per_rank_logical_count: bool = False
+    """Some policy reads the ``[ep_size, num_logical]`` per-source-rank count
+    (``logical_count == "per_rank"``) rather than its EP sum. A framework that
+    supplies ``RoutingRequest.global_logical_count`` itself must then supply
+    that shape; leaving it unset lets the orchestrator gather it."""
     supports_concurrent_microbatches: bool = True
     """False when a policy keeps per-layer state that concurrent micro-batches
     would clobber."""
@@ -104,6 +110,9 @@ class RoutingPolicySpec:
     ``logical_count`` / ``rank_load`` name the data view the policy consumes:
     ``None`` (does not read it), ``"local"`` (this rank's own numbers), or
     ``"global"`` (EP-wide, which the orchestrator gathers with one collective).
+    ``logical_count`` may also be ``"per_rank"``: the ``[ep_size, num_logical]``
+    count of every source rank, gathered with the same single collective (each
+    rank fills its own row of a zeroed payload before the sum).
 
     A policy whose declaration depends on its :class:`RoutingPolicyConfig` sets
     ``configure``; the pipeline calls it once per selection and stores the
@@ -133,8 +142,8 @@ class RoutingPolicySpec:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "incompatible_with", frozenset(self.incompatible_with))
-        if self.logical_count not in _DATA_VIEWS:
-            raise ValueError("logical_count must be None, 'local', or 'global'.")
+        if self.logical_count not in _LOGICAL_COUNT_VIEWS:
+            raise ValueError("logical_count must be None, 'local', 'global', or 'per_rank'.")
         if self.rank_load not in _DATA_VIEWS:
             raise ValueError("rank_load must be None, 'local', or 'global'.")
         if self.rank_load is not None and self.phase is not RoutingPhase.SHARED_EXPERT:
