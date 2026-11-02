@@ -449,19 +449,20 @@ class MoELoadBalancer:
         from evenmoe.kernels.ops.counting import count_logical_experts
 
         placement = request.placement
-        local_count = count_logical_experts(
-            request.logical_topk_ids, placement.num_logical_experts
-        )
+        ids = request.logical_topk_ids
+        if not isinstance(ids, torch.Tensor):
+            raise TypeError("Logical-count routing requires torch.Tensor logical_topk_ids.")
         world_size = placement.ep_size
         rank = 0 if world_size == 1 and self._collectives is None else self._collective_rank()
         if not 0 <= rank < world_size:
             raise ValueError("Routing collective rank is outside the placement EP group.")
         payload = torch.zeros(
             (world_size, placement.num_logical_experts),
-            dtype=local_count.dtype,
-            device=local_count.device,
+            dtype=torch.float32,
+            device=ids.device,
         )
-        payload[rank].copy_(local_count)
+        # Count straight into this rank's row: no separate histogram + copy.
+        count_logical_experts(ids, placement.num_logical_experts, out=payload[rank])
         return self._all_reduce_sum(payload, world_size)
 
     def _global_rank_load(

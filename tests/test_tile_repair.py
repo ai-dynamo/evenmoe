@@ -339,6 +339,17 @@ def test_layer_without_replicas_skips_the_collective():
     assert decision.routed_physical_topk_ids.tolist() == [[0, 3], [1, 2]]
 
 
+def test_count_logical_experts_into_a_payload_row():
+    from evenmoe.kernels.ops.counting import count_logical_experts
+
+    payload = torch.zeros(3, 4)
+    ids = torch.tensor([[0, 3], [3, -1], [2, 3]])
+    count_logical_experts(ids, 4, out=payload[1])
+    assert payload.tolist() == [[0, 0, 0, 0], [1, 0, 1, 3], [0, 0, 0, 0]]
+    with pytest.raises(ValueError, match="contiguous float32"):
+        count_logical_experts(ids, 4, out=torch.zeros(4, 3)[:, 0])
+
+
 def test_ep_summed_count_is_rejected():
     p2l = [0, 1, 2, 3, 4, 7, 4, 5, 6, 7, 0, 1]
     placement = _snapshot(p2l, num_logical=8, ranks=2)
