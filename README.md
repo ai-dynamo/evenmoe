@@ -160,23 +160,25 @@ LPLB requires redundant replicas (`--ep-num-redundant-experts > 0`) and a record
 
 #### Tile-aware placement and routing (decode)
 
-In decode an expert sees a handful of tokens, and the grouped GEMM pays for whole `BLOCK_M`-row tiles, so a rank's MoE time follows its number of tiles `Σ ceil(m / BLOCK_M)` rather than its token count; token-balanced EPLB plus redundancy can even be slower than no redundancy. The `tile` placement packs experts by *expected tiles* (EPLB without redundancy) and spends the redundant slots as `X = redundant / ep_size` extra copies per rank of the experts with the most expected tiles. `tile_repair` then routes every token to its expert's primary copy and moves single partial tiles of replicated experts off the busiest rank while that strictly lowers its tile count (never worse than primary-only routing), with exact per-copy quotas computed identically on every rank from one `[ep_size, num_logical]` count all-reduce per layer.
+In decode an expert sees a handful of tokens, and the grouped GEMM pays for whole `BLOCK_M`-row tiles, so a rank's MoE time follows its number of tiles `Σ ceil(m / BLOCK_M)` rather than its token count; token-balanced EPLB plus redundancy can even be slower than no redundancy. The `tile` placement packs experts by *expected tiles* (EPLB without redundancy) and spends the redundant slots as `X = redundant / ep_size` extra copies per rank of the experts with the most expected tiles. `tile_repair` then routes every token to its expert's primary copy and moves single partial tiles of replicated experts off the busiest rank while that strictly lowers its tile count (never worse than primary-only routing), with exact per-copy quotas computed identically on every rank from the per-source-rank counts `[ep_size, num_logical]` of the layer. By default those counts are gathered with one framework all-reduce per layer; with `EVENMOE_TILE_P2P=1` and all EP ranks in one NVLink domain, one fused launch per layer counts, exchanges the counts over NVLink (torch symmetric memory on the EP group), plans and rewrites instead — about 5–7 µs per layer over a plain static gather on H20, against 15–19 µs for the all-reduce path. A late peer (first-use JIT, for example) makes the waiting ranks route that call primary-only after `EVENMOE_TILE_P2P_TIMEOUT_MS` (2000 ms); routing stays valid and the next call is back in step. Across hosts, or without symmetric memory, every rank keeps the all-reduce path.
 
 Select `--moe-load-balancer-algorithm tile_repair` with `--ep-num-redundant-experts = X × ep_size` (for example 32 at EP8), and either `--eplb-algorithm tile` or an `--init-expert-location` file produced by the `tile` planner. Placement and routing must agree on the tile size; both read the knobs below (routing policy metadata or `PlacementPolicyConfig.metadata` override the environment).
 
 | Knob | Environment variable | Default | Meaning |
 |:---|:---|:---|:---|
-| `block_m` | `EVENMOE_TILE_BLOCK_M` | `64` | M tile of the MoE grouped GEMM on each rank |
+| `block_m` | `EVENMOE_TILE_BLOCK_M` | `64` | M tile of the MoE grouped GEMM on each rank; `0` = adaptive (8/16/32/48/64 by expected rows per physical slot, per call) |
 | `max_moves` | `EVENMOE_TILE_MAX_MOVES` | `32` | Repair moves per layer per forward |
 | `stages` | `EVENMOE_TILE_REPAIR_STAGES` | `decode,idle,speculative` | Stages that repair (`all` for every stage); other stages route to primary copies but still join the count collective |
 | `tokens_per_pass` | `EVENMOE_TILE_TOKENS_PER_PASS` | `128 × ep_size` | Placement only: expected routed (token, expert) pairs per forward on the whole EP group |
+| `p2p` | `EVENMOE_TILE_P2P` | off | Exchange the counts over NVLink inside the routing launch (one NVLink domain; needs the EP process group from `RoutingCollectives.device_group` or the build option `ep_process_group`) |
+| `p2p` timeout | `EVENMOE_TILE_P2P_TIMEOUT_MS` | `2000` | How long a rank waits for a peer's counts before routing that call primary-only |
 
 | MoE GEMM backend | `block_m` |
 |:---|:---|
 | DeepGEMM SM90 FP8 masked grouped GEMM (Hopper, e.g. H20/H100/H200) | `64` |
 | DeepGEMM SM100 grouped GEMM (Blackwell) | `128` |
 | Swap-AB / small-M grouped GEMM kernels | the kernel's M tile (`8`, `16` or `32`) |
-| Autotuned kernels (e.g. Humming) | the tile the tuner picks for decode batches (`8`–`64`) |
+| Autotuned kernels (e.g. Humming) | `0` (adaptive), or the tile the tuner picks for decode batches (`8`–`64`) |
 
 ### vLLM
 
