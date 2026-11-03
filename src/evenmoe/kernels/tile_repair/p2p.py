@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 import os
 import socket
+import warnings
 import zlib
 from dataclasses import dataclass, field
 from typing import Any
@@ -230,7 +231,10 @@ def create_peer_exchange(
         enable = getattr(symm_mem, "enable_symm_mem_for_group", None)
         if enable is not None and group_name is not None:
             try:
-                enable(group_name)
+                with warnings.catch_warnings():
+                    # Deprecated (a no-op) on newer torch, required on older.
+                    warnings.simplefilter("ignore", FutureWarning)
+                    enable(group_name)
             except _SETUP_ERRORS as exc:  # newer torch enables every group already
                 logger.debug("enable_symm_mem_for_group(%s): %s", group_name, exc)
         handle = symm_mem.rendezvous(buffer, group)
