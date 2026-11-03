@@ -14,11 +14,23 @@ above primary-only static routing.
 Contract:
 
 - The policy runs in every stage, and on every layer with a replicated expert
-  every EP rank joins one collective: the orchestrator all-reduces a
-  ``[ep_size, num_logical]`` payload in which each rank fills its own row
-  (``RoutingPolicySpec.logical_count == "per_rank"``). Stages in ``stages``
+  every EP rank joins one exchange of per-rank counts. Stages in ``stages``
   (default decode, idle, speculative; ``"all"`` for every stage) run the
   repair; the others route every token to its primary copy.
+- Exchange, default: the orchestrator all-reduces a ``[ep_size, num_logical]``
+  payload in which each rank fills its own row
+  (``RoutingPolicySpec.logical_count == "per_rank"``) through the framework's
+  :class:`~evenmoe.core.l2.RoutingCollectives`.
+- Exchange, opt-in P2P (``p2p``: build option ``tile_p2p`` or
+  ``EVENMOE_TILE_P2P=1``): one fused launch per layer counts, exchanges the
+  counts over NVLink through torch symmetric memory, plans and rewrites
+  (:mod:`evenmoe.kernels.tile_repair.p2p`); the router then declines the
+  orchestrator's collective. It needs the EP ``torch.distributed`` process
+  group: build option ``ep_process_group``, else the ``device_group``
+  attribute of the framework's ``RoutingCollectives`` (optional). The buffers
+  are set up collectively the first time a placement is prepared (model
+  setup, never inside CUDA-graph capture). Without a group, across hosts, or
+  without symmetric memory every rank keeps the all-reduce path.
 - Placement tables are built from the rank-invariant
   ``physical_to_logical_map``: copies ordered by (local slot index, physical
   id), same-rank duplicates merged, at most four distinct-rank copies. Pair it
@@ -26,8 +38,11 @@ Contract:
   keeps a logical expert's preferred copy at the lowest local index.
 
 Tunables (``RoutingPolicyConfig.metadata``, then environment, then default):
-``block_m`` (``EVENMOE_TILE_BLOCK_M``, 64), ``max_moves``
+``block_m`` (``EVENMOE_TILE_BLOCK_M``, 64; 0 = adaptive per call), ``max_moves``
 (``EVENMOE_TILE_MAX_MOVES``, 32), ``stages`` (``EVENMOE_TILE_REPAIR_STAGES``).
+Process-wide (build option, then environment): ``p2p`` (``tile_p2p`` /
+``EVENMOE_TILE_P2P``, off) and its timeout (``tile_p2p_timeout_ms`` /
+``EVENMOE_TILE_P2P_TIMEOUT_MS``, 2000).
 """
 
 from __future__ import annotations
@@ -58,9 +73,15 @@ from evenmoe.kernels.tile_repair import (
     tile_repair_route_reference,
 )
 from evenmoe.policies.l2.replica import route_static_replicas
+from evenmoe.kernels.tile_repair.p2p import (
+    TileRepairPeerExchange,
+    create_peer_exchange,
+    tile_repair_route_p2p,
+)
 from evenmoe.policies.tile_common import (
     resolve_block_m,
     resolve_max_moves,
+    resolve_p2p,
     resolve_stages,
 )
 
@@ -71,6 +92,7 @@ logger = logging.getLogger(__name__)
 class _LayerState:
     tables: TileRepairTables
     has_redundancy: bool
+    num_slots: int
 
 
 def tables_from_snapshot(snapshot: PlacementSnapshot) -> TileRepairTables:
@@ -110,6 +132,10 @@ class TileRepairL2Router(TokenRouter):
         max_moves: int | None = None,
         stages: frozenset[RoutingStage] | str | None = None,
         out_dtype: torch.dtype | None = torch.int64,
+        p2p: bool | str | None = None,
+        process_group: Any = None,
+        p2p_timeout_ms: float | None = None,
+        exchange: TileRepairPeerExchange | None = None,
     ):
         if num_ranks <= 0:
             raise ValueError("TileRepairL2Router.num_ranks must be positive.")
@@ -123,6 +149,50 @@ class TileRepairL2Router(TokenRouter):
         self.out_dtype = out_dtype
         self._layer_state: dict[int, _LayerState] = {}
         self._warned_fallback = False
+        # P2P exchange: requested? then None until set up, the exchange, or False.
+        self.p2p_requested = exchange is not None or resolve_p2p({"p2p": p2p})
+        self._process_group = process_group
+        self._p2p_timeout_ms = p2p_timeout_ms
+        self._exchange: TileRepairPeerExchange | bool | None = exchange
+
+    @property
+    def p2p_exchange(self) -> TileRepairPeerExchange | None:
+        """The live P2P exchange, or None while the all-reduce path is in use."""
+
+        return self._exchange if isinstance(self._exchange, TileRepairPeerExchange) else None
+
+    def _ensure_exchange(self) -> TileRepairPeerExchange | None:
+        """Set up the P2P exchange once (a collective on every EP rank)."""
+
+        if not self.p2p_requested or self._exchange is False:
+            return None
+        if isinstance(self._exchange, TileRepairPeerExchange):
+            return self._exchange
+        exchange = None
+        if self._process_group is None:
+            logger.warning(
+                "tile_repair p2p requested but no EP process group was provided "
+                "(build option 'ep_process_group' or RoutingCollectives.device_group); "
+                "using the all-reduce count path."
+            )
+        elif not torch.cuda.is_available():
+            logger.warning("tile_repair p2p needs CUDA; using the all-reduce count path.")
+        else:
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError(
+                    "tile_repair's P2P exchange must be set up before CUDA-graph capture; "
+                    "commit a placement (prepare_layer) eagerly first."
+                )
+            exchange = create_peer_exchange(self._process_group, timeout_ms=self._p2p_timeout_ms)
+            if exchange is None:
+                logger.warning("tile_repair p2p unavailable; using the all-reduce count path.")
+            elif exchange.world_size != self.num_ranks or exchange.rank != self.source_rank:
+                raise ValueError(
+                    f"EP process group rank {exchange.rank}/{exchange.world_size} does not match "
+                    f"the router's source_rank {self.source_rank}/{self.num_ranks}."
+                )
+        self._exchange = exchange if exchange is not None else False
+        return exchange
 
     def prepare_layer(self, snapshot: PlacementSnapshot) -> None:
         """Install the tables of a newly committed placement for one layer.
@@ -131,12 +201,14 @@ class TileRepairL2Router(TokenRouter):
         graph keeps reading the live placement.
         """
 
+        self._ensure_exchange()
         state = self._build_state(snapshot)
         current = self._layer_state.get(snapshot.layer_id)
         if current is not None and _same_layout(current.tables, state.tables):
             for dst, src in zip(current.tables.tensors(), state.tables.tensors()):
                 dst.copy_(src)
             current.has_redundancy = state.has_redundancy
+            current.num_slots = state.num_slots
             return
         self._layer_state[snapshot.layer_id] = state
 
@@ -144,12 +216,16 @@ class TileRepairL2Router(TokenRouter):
         """Only a layer with a replicated expert has a choice to make.
 
         Deliberately independent of the stage: every EP rank must join the
-        collective, including ranks whose own stage routes primary-only.
+        collective, including ranks whose own stage routes primary-only. With
+        the P2P exchange the routing launch gathers the counts itself.
         """
 
         if request.placement is None:
             return False
-        return self._state(request.layer_id, request.placement).has_redundancy
+        if not self._state(request.layer_id, request.placement).has_redundancy:
+            return False
+        exchange = self._ensure_exchange()
+        return exchange is None or not _is_cuda(request.logical_topk_ids)
 
     def route_tokens(
         self,
@@ -178,6 +254,35 @@ class TileRepairL2Router(TokenRouter):
             and (request.stage is None or request.stage in stages)
             and policy.should_run_for_stage(request.stage)
         )
+        exchange = self.p2p_exchange
+        if (
+            exchange is not None
+            and state.has_redundancy
+            and topk_ids.is_cuda
+            and supports(state.tables.num_logical, state.tables.num_ranks)
+        ):
+            # Every rank exchanges on every layer with replicas, in every
+            # stage; a stage without repair plans zero moves (primary-only).
+            physical = tile_repair_route_p2p(
+                topk_ids,
+                state.tables,
+                exchange,
+                block_m=block_m,
+                max_moves=max_moves if repair else 0,
+                num_slots=state.num_slots,
+                out_dtype=out_dtype,
+            )
+            return RoutingDecision(
+                routed_physical_topk_ids=physical,
+                topk_weights=request.topk_weights,
+                metadata={
+                    "policy": policy.name,
+                    "tile_repair": repair,
+                    "block_m": block_m,
+                    "max_moves": max_moves,
+                    "exchange": "p2p",
+                },
+            )
         if not repair:
             return self._primary_only(request, state, policy, out_dtype)
 
@@ -206,6 +311,7 @@ class TileRepairL2Router(TokenRouter):
                 source_rank=self.source_rank,
                 block_m=block_m,
                 max_moves=max_moves,
+                num_slots=state.num_slots,
             ).to(out_dtype)
         elif supports(tables.num_logical, tables.num_ranks):
             physical = tile_repair_route(
@@ -216,6 +322,7 @@ class TileRepairL2Router(TokenRouter):
                 block_m=block_m,
                 max_moves=max_moves,
                 out_dtype=out_dtype,
+                num_slots=state.num_slots,
             )
         else:
             if not self._warned_fallback:
@@ -236,6 +343,7 @@ class TileRepairL2Router(TokenRouter):
                 "tile_repair": True,
                 "block_m": block_m,
                 "max_moves": max_moves,
+                "exchange": "all_reduce",
             },
         )
 
@@ -261,8 +369,8 @@ class TileRepairL2Router(TokenRouter):
         block_m = int(metadata.get("block_m", self.block_m))
         max_moves = int(metadata.get("max_moves", self.max_moves))
         stages = resolve_stages(metadata) if "stages" in metadata else self.stages
-        if block_m <= 0 or max_moves < 0:
-            raise ValueError("tile_repair needs block_m > 0 and max_moves >= 0.")
+        if block_m < 0 or max_moves < 0:
+            raise ValueError("tile_repair needs block_m >= 0 (0 = adaptive) and max_moves >= 0.")
         return block_m, max_moves, stages
 
     def _state(self, layer_id: int, placement: PlacementSnapshot) -> _LayerState:
@@ -280,7 +388,9 @@ class TileRepairL2Router(TokenRouter):
             )
         tables = tables_from_snapshot(snapshot)
         return _LayerState(
-            tables=tables, has_redundancy=int(tables.num_replicated.cpu()[0]) > 0
+            tables=tables,
+            has_redundancy=int(tables.num_replicated.cpu()[0]) > 0,
+            num_slots=snapshot.num_physical_experts,
         )
 
 
@@ -291,15 +401,27 @@ def _same_layout(left: TileRepairTables, right: TileRepairTables) -> bool:
     )
 
 
+def _is_cuda(value: object) -> bool:
+    return isinstance(value, Tensor) and value.is_cuda
+
+
 def _build_router(context: RouterBuildContext) -> TileRepairL2Router:
     # Optional injections; unset ones fall back to the environment and defaults.
     options: Mapping[str, Any] = context.options
+    group = options.get("ep_process_group")
+    if group is None and context.collectives is not None:
+        group = getattr(context.collectives, "device_group", None)
+    exchange = options.get("tile_p2p_exchange")
     return TileRepairL2Router(
         num_ranks=context.ep_size,
         source_rank=context.source_rank,
         block_m=options.get("tile_block_m"),
         max_moves=options.get("tile_max_moves"),
         stages=options.get("tile_repair_stages"),
+        p2p=options.get("tile_p2p"),
+        process_group=group,
+        p2p_timeout_ms=options.get("tile_p2p_timeout_ms"),
+        exchange=exchange if isinstance(exchange, TileRepairPeerExchange) else None,
     )
 
 

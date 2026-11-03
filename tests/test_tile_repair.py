@@ -480,6 +480,8 @@ def test_cuda_kernel_matches_reference(block_m, ranks, num_logical, extras):
                 plan.lower_bound,
                 plan.primary_peak,
                 plan.peak,
+                block_m,
+                0,
                 *plan.rank_tiles.tolist(),
             ]
             outputs.append(out)

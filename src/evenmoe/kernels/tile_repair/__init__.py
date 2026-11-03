@@ -15,12 +15,17 @@ per-source-rank logical counts ``counts[R, L]`` and of a rank-invariant
 placement table, so all ranks agree on the plan without further
 communication, and the per-copy token totals equal the plan exactly.
 
+``block_m == 0`` is adaptive: each call picks 8/16/32/48/64 rows from the
+expected rows per physical slot (:func:`adaptive_block_m`).
+
 Layout:
 
-- ``csrc/route.cuh``  the fused kernel (totals, repair, exact-quota rewrite) and
-                      its tvm-ffi entry point; compiled per (id dtype, output
-                      dtype). ``block_m``, ``max_moves`` and the source rank are
-                      runtime arguments.
+- ``csrc/route.cuh``  the fused kernels (totals, repair, exact-quota rewrite)
+                      and their tvm-ffi entry points; compiled per (id dtype,
+                      output dtype). ``block_m``, ``max_moves`` and the source
+                      rank are runtime arguments. ``tile_repair_route`` reads
+                      gathered counts; ``tile_repair_route_p2p``
+                      (:mod:`.p2p`) gathers them itself over NVLink.
 - :func:`tile_repair_plan_reference` / :func:`tile_repair_route_reference`
   are bit-exact host mirrors of the kernel used as the test oracle and as the
   CPU path.
@@ -52,9 +57,45 @@ MAX_COPIES = 4
 """Distinct-rank copies per logical expert the router can use. Copies on
 further ranks (lowest local index first) are never routed to."""
 
-NUM_STATS = 4
+NUM_STATS = 6
 """Leading entries of the optional stats output: moves, lower bound,
-primary-only peak tiles, final peak tiles; per-rank tiles follow."""
+primary-only peak tiles, final peak tiles, the ``block_m`` used, and the P2P
+exchange failure bits (:data:`P2P_FAIL_TIMEOUT` | :data:`P2P_FAIL_OVERWRITTEN`
+| :data:`P2P_FAIL_OVERFLOW`; always 0 on the gathered-count path); per-rank
+tiles follow."""
+
+P2P_FAIL_TIMEOUT = 1
+"""A peer's count did not arrive within the timeout."""
+P2P_FAIL_OVERWRITTEN = 2
+"""A peer had already moved on to a later call (this call's data is gone)."""
+P2P_FAIL_OVERFLOW = 4
+"""Some rank had 0xFFFF or more entries of one expert (the 16-bit count field)."""
+
+ADAPTIVE_BLOCK_M = 0
+"""``block_m`` value that selects the tile height per call."""
+
+
+def adaptive_block_m(total_rows: int, num_slots: int) -> int:
+    """Tile height for ``total_rows`` routed entries over ``num_slots`` physical slots.
+
+    Mirrors the kernel: expected rows per slot ``em = total_rows / num_slots``
+    in exact integer compares; em < 5.5 -> 8, < 12.7 -> 16, < 28.4 -> 32,
+    < 80 -> 48, else 64 (the M tiles a small-M autotuned grouped GEMM such as
+    Humming switches between).
+    """
+
+    if num_slots <= 0:
+        raise ValueError("num_slots must be positive.")
+    rows, slots = int(total_rows), int(num_slots)
+    if 2 * rows < 11 * slots:
+        return 8
+    if 10 * rows < 127 * slots:
+        return 16
+    if 10 * rows < 284 * slots:
+        return 32
+    if rows < 80 * slots:
+        return 48
+    return 64
 
 
 @dataclass(frozen=True)
@@ -200,6 +241,8 @@ class TileRepairPlan:
     moves: int
     lower_bound: int
     primary_peak: int
+    block_m: int
+    """Tile height used (resolved when the call was adaptive)."""
 
     @property
     def peak(self) -> int:
@@ -212,17 +255,26 @@ def tile_repair_plan_reference(
     *,
     block_m: int,
     max_moves: int,
+    num_slots: int | None = None,
 ) -> TileRepairPlan:
-    """Host oracle of the kernel's plan for EP-wide per-source counts ``[R, L]``."""
+    """Host oracle of the kernel's plan for EP-wide per-source counts ``[R, L]``.
 
-    if block_m <= 0:
-        raise ValueError("block_m must be positive.")
+    ``block_m == 0`` is adaptive and needs ``num_slots`` (physical experts).
+    """
+
+    if block_m < 0:
+        raise ValueError("block_m must be non-negative (0 = adaptive).")
+    if block_m == 0 and not num_slots:
+        raise ValueError("Adaptive block_m needs num_slots.")
     ranks = tables.num_ranks
     num_logical = tables.num_logical
     counts = torch.as_tensor(counts).detach().cpu()
     if counts.shape != (ranks, num_logical):
         raise ValueError(f"counts must have shape [{ranks}, {num_logical}], got {tuple(counts.shape)}.")
     totals = counts.to(torch.float64).round().to(torch.int64).sum(0).tolist()
+    if block_m == 0:
+        assert num_slots is not None
+        block_m = adaptive_block_m(sum(totals), num_slots)
     copy_rank = tables.copy_rank.cpu().tolist()
     num_copies = tables.num_copies.cpu().tolist()
     num_rep = int(tables.num_replicated.cpu()[0])
@@ -291,6 +343,7 @@ def tile_repair_plan_reference(
         moves=moves,
         lower_bound=lower_bound,
         primary_peak=primary_peak,
+        block_m=block_m,
     )
 
 
@@ -303,11 +356,14 @@ def tile_repair_route_reference(
     block_m: int,
     max_moves: int,
     plan: TileRepairPlan | None = None,
+    num_slots: int | None = None,
 ) -> Tensor:
     """Host mirror of :func:`tile_repair_route` (bit-exact, same output dtype as the ids)."""
 
     if plan is None:
-        plan = tile_repair_plan_reference(counts, tables, block_m=block_m, max_moves=max_moves)
+        plan = tile_repair_plan_reference(
+            counts, tables, block_m=block_m, max_moves=max_moves, num_slots=num_slots
+        )
     counts_h = torch.as_tensor(counts).detach().cpu().to(torch.float64).round().to(torch.int64)
     prefix = counts_h[:source_rank].sum(0).tolist()
     num_logical = tables.num_logical
@@ -346,32 +402,23 @@ def _route_module(in_dtype: torch.dtype, out_dtype: torch.dtype) -> Module:
         "tile_repair_route",
         *args,
         cuda_files=["route.cuh"],
-        cuda_wrappers=[("tile_repair_route", f"tile_repair_route<{args}>")],
+        cuda_wrappers=[
+            ("tile_repair_route", f"tile_repair_route<{args}>"),
+            ("tile_repair_route_p2p", f"tile_repair_route_p2p<{args}>"),
+        ],
         source_root=_HERE,
     )
 
 
-def tile_repair_route(
+def _check_route_args(
     logical_topk_ids: Tensor,
-    counts: Tensor,
     tables: TileRepairTables,
     *,
-    source_rank: int,
     block_m: int,
-    max_moves: int = 32,
-    out_dtype: torch.dtype = torch.int64,
-    plan_out: Tensor | None = None,
-    stats_out: Tensor | None = None,
-) -> Tensor:
-    """Map logical TopK ids ``[T, K]`` to physical copies with tile_repair.
-
-    ``counts`` is the EP-wide ``[R, L]`` per-source-rank logical count (any
-    float or integer dtype; it is passed to the kernel as float32, exact up
-    to 2**24 per entry). ``plan_out`` (``[L * MAX_COPIES]`` int32) and
-    ``stats_out`` (``[NUM_STATS + R]`` int32) optionally receive the plan.
-    One launch on the current stream, no host synchronisation, CUDA-graph safe.
-    """
-
+    max_moves: int,
+    num_slots: int | None,
+    out_dtype: torch.dtype,
+) -> None:
     if not logical_topk_ids.is_cuda:
         raise ValueError("tile_repair_route runs on CUDA tensors; use the reference on CPU.")
     num_logical = tables.num_logical
@@ -385,10 +432,47 @@ def tile_repair_route(
         raise TypeError(f"logical_topk_ids must be int32 or int64, got {logical_topk_ids.dtype}.")
     if out_dtype not in (torch.int32, torch.int64):
         raise TypeError(f"out_dtype must be int32 or int64, got {out_dtype}.")
+    if block_m < 0 or max_moves < 0:
+        raise ValueError("block_m (0 = adaptive) and max_moves must be non-negative.")
+    if block_m == 0 and not num_slots:
+        raise ValueError("Adaptive block_m (0) needs num_slots, the number of physical experts.")
+
+
+def tile_repair_route(
+    logical_topk_ids: Tensor,
+    counts: Tensor,
+    tables: TileRepairTables,
+    *,
+    source_rank: int,
+    block_m: int,
+    max_moves: int = 32,
+    out_dtype: torch.dtype = torch.int64,
+    plan_out: Tensor | None = None,
+    stats_out: Tensor | None = None,
+    num_slots: int | None = None,
+) -> Tensor:
+    """Map logical TopK ids ``[T, K]`` to physical copies with tile_repair.
+
+    ``counts`` is the EP-wide ``[R, L]`` per-source-rank logical count (any
+    float or integer dtype; it is passed to the kernel as float32, exact up
+    to 2**24 per entry). ``plan_out`` (``[L * MAX_COPIES]`` int32) and
+    ``stats_out`` (``[NUM_STATS + R]`` int32) optionally receive the plan.
+    ``block_m == 0`` is adaptive and needs ``num_slots`` (physical experts).
+    One launch on the current stream, no host synchronisation, CUDA-graph safe.
+    """
+
+    _check_route_args(
+        logical_topk_ids,
+        tables,
+        block_m=block_m,
+        max_moves=max_moves,
+        num_slots=num_slots,
+        out_dtype=out_dtype,
+    )
+    num_logical = tables.num_logical
+    ranks = tables.num_ranks
     if counts.shape != (ranks, num_logical):
         raise ValueError(f"counts must have shape [{ranks}, {num_logical}], got {tuple(counts.shape)}.")
-    if block_m <= 0 or max_moves < 0:
-        raise ValueError("block_m must be positive and max_moves non-negative.")
     ids = logical_topk_ids if logical_topk_ids.dim() == 2 else logical_topk_ids.reshape(-1, 1)
     ids = ids.contiguous()
     device = ids.device
@@ -409,18 +493,24 @@ def tile_repair_route(
         empty if stats_out is None else stats_out,
         int(source_rank),
         int(block_m),
+        int(num_slots or 0),
         int(max_moves),
     )
     return out.view(logical_topk_ids.shape)
 
 
 __all__ = [
+    "ADAPTIVE_BLOCK_M",
     "MAX_COPIES",
     "MAX_LOGICAL",
     "MAX_RANKS",
     "NUM_STATS",
+    "P2P_FAIL_OVERFLOW",
+    "P2P_FAIL_OVERWRITTEN",
+    "P2P_FAIL_TIMEOUT",
     "TileRepairPlan",
     "TileRepairTables",
+    "adaptive_block_m",
     "build_tile_repair_tables",
     "supports",
     "tile_repair_plan_reference",

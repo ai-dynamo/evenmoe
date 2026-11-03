@@ -71,6 +71,7 @@ testpaths = ["tests"]
 markers = [
     "unit: framework-neutral core/contract tests",
     "integration: tests that touch adapter glue or external frameworks",
+    "multi_gpu: tests that launch several GPU processes (skipped below two devices)",
 ]
 
 [tool.ruff]

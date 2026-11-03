@@ -19,8 +19,20 @@ Backend                                     block_m
 DeepGEMM SM90 FP8 masked grouped GEMM       64
 DeepGEMM SM100 grouped GEMM                 128
 swap-AB / small-M grouped GEMM kernels      8, 16, 32 (the kernel's M tile)
-Humming / autotuned kernels                 the tile the tuner picks (8-64)
+Humming / autotuned kernels                 0 (adaptive) or the tile the tuner picks
 ==========================================  =========
+
+``block_m = 0`` is adaptive: routing picks 8/16/32/48/64 rows per call from
+the expected rows per physical slot (sum of the call's routed entries over the
+number of physical experts; :func:`evenmoe.kernels.tile_repair.adaptive_block_m`),
+and placement picks it once from ``tokens_per_pass``. Use it with GEMMs whose M
+tile follows the expected rows (Humming-style small-M tuning); DeepGEMM SM90
+always runs 64-row tiles, so keep 64 there.
+
+``p2p`` (``EVENMOE_TILE_P2P``, default off) makes ``tile_repair`` exchange the
+per-rank counts over NVLink inside its routing launch instead of through the
+framework all-reduce (one NVLink domain; see
+:mod:`evenmoe.kernels.tile_repair.p2p`).
 """
 
 from __future__ import annotations
@@ -39,6 +51,7 @@ BLOCK_M_ENV = "EVENMOE_TILE_BLOCK_M"
 MAX_MOVES_ENV = "EVENMOE_TILE_MAX_MOVES"
 STAGES_ENV = "EVENMOE_TILE_REPAIR_STAGES"
 TOKENS_PER_PASS_ENV = "EVENMOE_TILE_TOKENS_PER_PASS"
+P2P_ENV = "EVENMOE_TILE_P2P"
 
 DEFAULT_BLOCK_M = 64
 DEFAULT_MAX_MOVES = 32
@@ -58,11 +71,29 @@ def _lookup(metadata: Mapping[str, Any] | None, key: str, env: str) -> Any:
 
 
 def resolve_block_m(metadata: Mapping[str, Any] | None = None) -> int:
+    """GEMM tile rows; 0 means adaptive (picked per call / per plan)."""
+
     value = _lookup(metadata, "block_m", BLOCK_M_ENV)
     block_m = DEFAULT_BLOCK_M if value is None else int(value)
-    if block_m <= 0:
-        raise ValueError(f"block_m must be positive, got {block_m}.")
+    if block_m < 0:
+        raise ValueError(f"block_m must be non-negative (0 = adaptive), got {block_m}.")
     return block_m
+
+
+def resolve_p2p(metadata: Mapping[str, Any] | None = None) -> bool:
+    """Whether tile_repair should try the fused NVLink P2P count exchange."""
+
+    value = _lookup(metadata, "p2p", P2P_ENV)
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"p2p must be a boolean, got {value!r}.")
 
 
 def resolve_max_moves(metadata: Mapping[str, Any] | None = None) -> int:
@@ -129,11 +160,13 @@ __all__ = [
     "DEFAULT_PAIRS_PER_RANK",
     "DEFAULT_STAGES",
     "MAX_MOVES_ENV",
+    "P2P_ENV",
     "STAGES_ENV",
     "TOKENS_PER_PASS_ENV",
     "expected_tiles",
     "resolve_block_m",
     "resolve_max_moves",
+    "resolve_p2p",
     "resolve_stages",
     "resolve_tokens_per_pass",
 ]

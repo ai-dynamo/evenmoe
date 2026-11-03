@@ -19,7 +19,8 @@ inside tile padding. This planner balances *expected tiles* instead:
 Each rank's slots are ``[primaries | extras]``, so the primary of every
 logical expert is its lowest-local-index copy -- the copy ``tile_repair``
 starts from. Tunables (``PlacementPolicyConfig.metadata``, then environment):
-``block_m`` (``EVENMOE_TILE_BLOCK_M``, default 64) and ``tokens_per_pass``
+``block_m`` (``EVENMOE_TILE_BLOCK_M``, default 64; 0 = adaptive, picked once
+from ``tokens_per_pass / num_physical``) and ``tokens_per_pass``
 (``EVENMOE_TILE_TOKENS_PER_PASS``: expected routed (token, expert) pairs per
 forward on the whole EP group; default ``128 * ep_size``).
 """
@@ -31,6 +32,7 @@ from torch import Tensor
 
 from evenmoe.core.l1 import PlacementPlanner
 from evenmoe.core.types import PlacementPlan, PlacementPolicyConfig, PlacementRequest
+from evenmoe.kernels.tile_repair import adaptive_block_m
 from evenmoe.policies.l1.eplb.algorithms.deepseek import balanced_packing
 from evenmoe.policies.tile_common import (
     expected_tiles,
@@ -136,6 +138,8 @@ class TilePlacementPlanner(PlacementPlanner):
 
         block_m = resolve_block_m(policy.metadata)
         tokens_per_pass = resolve_tokens_per_pass(policy.metadata, num_ranks)
+        if block_m == 0:
+            block_m = adaptive_block_m(round(tokens_per_pass), num_physical)
         weight = tile_weights(counts, block_m=block_m, tokens_per_pass=tokens_per_pass)
         pack_index, rank_in_pack = balanced_packing(weight, num_ranks)
         pack_index = pack_index.cpu()

@@ -118,6 +118,7 @@ class MoELoadBalancer:
             source_rank=source_rank,
             experts_per_rank=experts_per_rank,
             options=options,
+            collectives=collectives,
         )
         routers: dict[str, TokenRouter] = {}
         for step in pipeline.steps:

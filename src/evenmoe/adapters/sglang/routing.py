@@ -34,6 +34,11 @@ class _SGLangCollectives:
     def world_size(self) -> int:
         return self.context.parallel.moe_ep_group.world_size
 
+    @property
+    def device_group(self):
+        """The EP NCCL process group (for policies with their own transport)."""
+        return self.context.parallel.moe_ep_group.device_group
+
     def all_reduce_sum(self, payload):
         return self.context.parallel.moe_ep_group.all_reduce(payload)
 

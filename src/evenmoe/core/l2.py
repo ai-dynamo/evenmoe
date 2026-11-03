@@ -28,6 +28,12 @@ class RoutingCollectives(Protocol):
     EvenMoE owns the count tensors, payload packing, and the point in the routing
     pipeline at which communication is required.  The serving framework owns
     the process group and the concrete all-reduce implementation.
+
+    Optional: a ``device_group`` attribute holding the EP
+    ``torch.distributed`` process group (rank order = EP rank order). Policies
+    that set up their own transport once -- ``tile_repair``'s NVLink P2P count
+    exchange -- read it through ``RouterBuildContext.collectives``; without it
+    they keep using :meth:`all_reduce_sum`.
     """
 
     @property
