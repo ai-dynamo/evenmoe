@@ -72,12 +72,12 @@ from evenmoe.kernels.tile_repair import (
     tile_repair_route,
     tile_repair_route_reference,
 )
-from evenmoe.policies.l2.replica import route_static_replicas
 from evenmoe.kernels.tile_repair.p2p import (
     TileRepairPeerExchange,
     create_peer_exchange,
     tile_repair_route_p2p,
 )
+from evenmoe.policies.l2.replica import route_static_replicas
 from evenmoe.policies.tile_common import (
     resolve_block_m,
     resolve_max_moves,

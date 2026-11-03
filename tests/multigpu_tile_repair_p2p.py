@@ -88,12 +88,11 @@ def main(out_dir: pathlib.Path) -> None:
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
     graph = torch.cuda.CUDAGraph()
-    with torch.cuda.stream(stream):
-        with torch.cuda.graph(graph, stream=stream):
-            outs = [
-                tile_repair_route_p2p(static, tables, exchange, block_m=64, num_slots=num_slots)
-                for _ in range(3)
-            ]
+    with torch.cuda.stream(stream), torch.cuda.graph(graph, stream=stream):
+        outs = [
+            tile_repair_route_p2p(static, tables, exchange, block_m=64, num_slots=num_slots)
+            for _ in range(3)
+        ]
     torch.cuda.current_stream().wait_stream(stream)
     for step in range(6):
         ids, counts = _ep_batch(world, num_logical, seed=2000 + step, tokens=[16] * world)

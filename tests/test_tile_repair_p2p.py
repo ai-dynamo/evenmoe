@@ -14,12 +14,7 @@ import os
 import subprocess
 import sys
 
-# The emulated ranks' launches run on separate streams and must not share a
-# hardware work queue (a shared queue serialises them and the exchange would
-# time out). Read when the CUDA context is created, after collection.
-os.environ.setdefault("CUDA_DEVICE_MAX_CONNECTIONS", "32")
-
-import pytest  # noqa: E402
+import pytest
 import torch
 from test_tile_repair import (
     _check_ep_routing,
@@ -51,6 +46,11 @@ from evenmoe.kernels.tile_repair.p2p import (
 from evenmoe.policies.l2 import tile_repair as tile_repair_policy
 from evenmoe.policies.l2.tile_repair import TileRepairL2Router
 from evenmoe.policies.tile_common import resolve_block_m, resolve_p2p
+
+# The emulated ranks' launches run on separate streams and must not share a
+# hardware work queue (a shared queue serialises them and the exchange would
+# time out). Read when the CUDA context is created, after collection.
+os.environ.setdefault("CUDA_DEVICE_MAX_CONNECTIONS", "32")
 
 cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA device")
 
@@ -122,7 +122,7 @@ def test_build_reads_the_group_from_collectives_and_falls_back(monkeypatch):
 
     def fake_create(group, **kwargs):
         seen.append(group)
-        return None  # e.g. multi-node: every rank keeps the all-reduce path
+        # e.g. multi-node: every rank keeps the all-reduce path
 
     monkeypatch.setattr(tile_repair_policy, "create_peer_exchange", fake_create)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
@@ -417,15 +417,14 @@ def test_p2p_cuda_graph_replay():
     graphs, captured = [], []
     for r in range(ranks):
         graph = torch.cuda.CUDAGraph()
-        with torch.cuda.stream(streams[r]):
-            with torch.cuda.graph(graph, stream=streams[r]):
-                # Two layers per graph: the epoch counter advances inside the graph.
-                first = tile_repair_route_p2p(
-                    static_ids[r], tables, exchanges[r], block_m=0, num_slots=len(p2l)
-                )
-                second = tile_repair_route_p2p(
-                    static_ids[r], tables, exchanges[r], block_m=0, num_slots=len(p2l)
-                )
+        with torch.cuda.stream(streams[r]), torch.cuda.graph(graph, stream=streams[r]):
+            # Two layers per graph: the epoch counter advances inside the graph.
+            first = tile_repair_route_p2p(
+                static_ids[r], tables, exchanges[r], block_m=0, num_slots=len(p2l)
+            )
+            second = tile_repair_route_p2p(
+                static_ids[r], tables, exchanges[r], block_m=0, num_slots=len(p2l)
+            )
         graphs.append(graph)
         captured.append((first, second))
     for step in range(4):
@@ -504,7 +503,7 @@ def test_p2p_symmetric_memory_across_processes(tmp_path):
     proc = subprocess.run(
         [sys.executable, "-m", "torch.distributed.run", "--standalone", f"--nproc-per-node={world}",
          _MULTI, str(tmp_path)],
-        env=env, capture_output=True, text=True, timeout=900,
+        env=env, capture_output=True, text=True, timeout=900, check=False,
     )
     assert proc.returncode == 0, proc.stdout[-4000:] + proc.stderr[-4000:]
     results = sorted(tmp_path.glob("rank*.ok"))

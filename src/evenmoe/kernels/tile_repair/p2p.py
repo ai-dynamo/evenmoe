@@ -52,6 +52,8 @@ from evenmoe.kernels.tile_repair import (
 logger = logging.getLogger(__name__)
 
 TIMEOUT_ENV = "EVENMOE_TILE_P2P_TIMEOUT_MS"
+# What a missing or unusable symmetric-memory backend raises across torch versions.
+_SETUP_ERRORS = (ImportError, AttributeError, RuntimeError, TypeError, ValueError, OSError)
 DEFAULT_TIMEOUT_MS = 2000.0
 
 
@@ -215,7 +217,7 @@ def create_peer_exchange(
             import torch.distributed._symmetric_memory as symm_mem
 
             buffer = symm_mem.empty(words, dtype=torch.int32, device=device)
-        except Exception as exc:  # backend missing, old torch, ...
+        except _SETUP_ERRORS as exc:  # backend missing, old torch, ...
             reason = f"symmetric memory unavailable ({exc})"
     if not _all_ranks_agree(not reason, group, collective_device):
         logger.info("tile_repair P2P exchange disabled: %s", reason or "a peer cannot use it")
@@ -229,13 +231,13 @@ def create_peer_exchange(
         if enable is not None and group_name is not None:
             try:
                 enable(group_name)
-            except Exception:  # newer torch enables every group already
-                pass
+            except _SETUP_ERRORS as exc:  # newer torch enables every group already
+                logger.debug("enable_symm_mem_for_group(%s): %s", group_name, exc)
         handle = symm_mem.rendezvous(buffer, group)
         pointers = [int(p) for p in handle.buffer_ptrs]
         if len(pointers) != world_size or not all(pointers):
             reason = "symmetric-memory rendezvous returned unusable peer pointers"
-    except Exception as exc:
+    except _SETUP_ERRORS as exc:
         reason = f"symmetric-memory rendezvous failed ({exc})"
     if not _all_ranks_agree(not reason, group, collective_device):
         logger.info("tile_repair P2P exchange disabled: %s", reason or "a peer cannot use it")
