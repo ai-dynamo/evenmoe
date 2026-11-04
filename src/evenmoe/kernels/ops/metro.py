@@ -376,7 +376,7 @@ def _route_module(in_dtype: torch.dtype, out_dtype: torch.dtype, num_ranks: int)
     return load_jit(
         "metro_repair_route",
         *args,
-        cuda_files=["route.cuh"],
+        cuda_files=["metro.cuh"],
         cuda_wrappers=[("metro_repair_route", f"metro_repair_route<{args}>")],
         source_root=_HERE,
     )
