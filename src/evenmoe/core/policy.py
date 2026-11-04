@@ -15,7 +15,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 
 from evenmoe.core.l1 import PlacementPlanner
-from evenmoe.core.l2 import RoutingCollectives, TokenRouter
+from evenmoe.core.l2 import TokenRouter
 from evenmoe.core.types import RoutingPhase, RoutingPolicyConfig, TensorLike
 
 _DATA_VIEWS = (None, "local", "global")
@@ -101,10 +101,6 @@ class RouterBuildContext:
     source_rank: int
     experts_per_rank: int
     options: Mapping[str, object] = field(default_factory=dict)
-    collectives: RoutingCollectives | None = None
-    """The framework's collectives, for a policy that sets up its own
-    transport once (for example ``tile_repair``'s P2P exchange reads the
-    optional ``device_group`` attribute)."""
 
 
 @dataclass(frozen=True)

@@ -29,24 +29,9 @@
 // physical slot ``em = sum_e G[e] / num_slots`` (integer compares, identical on
 // every rank): em < 5.5 -> 8, < 12.7 -> 16, < 28.4 -> 32, < 80 -> 48, else 64.
 //
-// Two entry points share steps 1-3:
-//
-// - ``tile_repair_route`` reads ``counts[R, L]`` gathered by the caller (the
-//   orchestrator's all-reduce of a per-rank payload).
-// - ``tile_repair_route_p2p`` gathers them itself inside the same launch over
-//   NVLink: it histograms this rank's ids, stores one 32-bit word
-//   ``(epoch16 << 16) | count16`` per expert into row ``rank`` of every peer's
-//   receive buffer (``peer_buffers[p]``, double-buffered by epoch parity), and
-//   polls its own buffer until every peer's word carries the current epoch.
-//   Each word validates itself, so no fence or flag round trip is needed. If a
-//   peer does not arrive within ``timeout_ns``, a peer's word is already from a
-//   later epoch (its data for this call was overwritten), or any count reaches
-//   0xFFFF, this rank routes the call primary-only (always valid). The epoch
-//   advances on every call either way, so ranks stay in step.
-//
-// Ids outside ``[0, L)`` come back as -1. No host synchronisation: the launches
-// are CUDA-graph capturable; ``num_replicated`` and the epoch are read on device
-// so a same-shape placement update stays valid inside a captured graph.
+// Counts [R, L] are gathered by the framework before this kernel runs.
+// Ids outside [0, L) become -1. Device-resident placement tables support
+// same-shape updates under CUDA Graph replay.
 
 #pragma once
 
@@ -60,7 +45,6 @@
 
 #include <climits>
 #include <cstdint>
-#include <cstdio>
 
 namespace {
 
@@ -69,13 +53,8 @@ constexpr int kTileWarps = kTileThreads / 32;
 constexpr int kTileMaxLogical = 512;
 constexpr int kTileMaxCopies = 4;
 constexpr int kTileMaxRanks = 32;
-// moves, lower bound, primary-only peak tiles, final peak tiles, block_m used,
-// P2P exchange failure bits (1 timeout, 2 overwritten, 4 count overflow).
-constexpr int kTileStats = 6;
-constexpr int kTileCountMax = 0xFFFF;  // P2P count field; this value means overflow
-constexpr int kTileFailTimeout = 1;
-constexpr int kTileFailOverwritten = 2;
-constexpr int kTileFailOverflow = 4;
+// moves, lower bound, primary-only peak tiles, final peak tiles, block_m used.
+constexpr int kTileStats = 5;
 static_assert(kTileMaxLogical % kTileThreads == 0, "table staging assumes whole per-thread slices");
 
 struct TileShared {
@@ -83,7 +62,6 @@ struct TileShared {
   int prefix[kTileMaxLogical];     // tokens of e from ranks < source_rank
   int seen[kTileMaxLogical];       // local entries of e already rewritten
   int rep_index[kTileMaxLogical];  // index into the replicated list, -1 if not replicated
-  int local[kTileMaxLogical];      // P2P: this rank's histogram
   int warp_count[kTileWarps][kTileMaxLogical];
   int rep_tokens[kTileMaxLogical][kTileMaxCopies];
   // Placement tables, staged into shared memory while the counts are gathered.
@@ -99,7 +77,6 @@ struct TileShared {
   int moves;
   int primary_peak;
   int block_m;
-  int failed;
 };
 
 // ceil(m / d) through a float reciprocal with exact integer correction
@@ -137,7 +114,6 @@ __device__ __forceinline__ void tile_init(TileShared& s, int num_logical) {
   for (int e = tid; e < num_logical; e += kTileThreads) {
     s.seen[e] = 0;
     s.rep_index[e] = -1;
-    s.local[e] = 0;
     s.total[e] = 0;
     s.prefix[e] = 0;
   }
@@ -154,7 +130,6 @@ __device__ __forceinline__ void tile_init(TileShared& s, int num_logical) {
     s.moves = 0;
     s.primary_peak = 0;
     s.block_m = 1;
-    s.failed = 0;
   }
 }
 
@@ -334,7 +309,7 @@ __device__ __forceinline__ void tile_write_plan(const TileShared& s,
       const int j = idx % kTileMaxCopies;
       const int ri = s.rep_index[e];
       int v;
-      if (s.failed != 0 || j >= s.copies[e]) {
+      if (j >= s.copies[e]) {
         v = 0;
       } else if (ri < 0) {
         v = j == 0 ? s.total[e] : 0;
@@ -353,7 +328,6 @@ __device__ __forceinline__ void tile_write_plan(const TileShared& s,
       stats_out[2] = s.primary_peak;
       stats_out[3] = static_cast<int>(peak);
       stats_out[4] = s.block_m;
-      stats_out[5] = s.failed;
     }
     if (lane < num_ranks) stats_out[kTileStats + lane] = s.tiles[lane];
   }
@@ -464,152 +438,6 @@ __global__ void __launch_bounds__(kTileThreads) tile_repair_route_kernel(
   tile_rewrite<InT, OutT>(s, logical_topk_ids, routed, num_ids, num_logical);
 }
 
-__device__ __forceinline__ void tile_st_relaxed_sys(int* ptr, int value) {
-  asm volatile("st.relaxed.sys.global.b32 [%0], %1;" ::"l"(ptr), "r"(value) : "memory");
-}
-
-__device__ __forceinline__ int tile_ld_relaxed_sys(const int* ptr) {
-  int value;
-  asm volatile("ld.relaxed.sys.global.b32 %0, [%1];" : "=r"(value) : "l"(ptr) : "memory");
-  return value;
-}
-
-__device__ __forceinline__ unsigned long long tile_globaltimer() {
-  unsigned long long t;
-  asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
-  return t;
-}
-
-template <typename InT, typename OutT>
-__global__ void __launch_bounds__(kTileThreads) tile_repair_route_p2p_kernel(
-    const InT* __restrict__ logical_topk_ids,
-    OutT* __restrict__ routed,
-    const int64_t* __restrict__ peer_buffers,   // [R] device addresses of every rank's receive buffer
-    int32_t* __restrict__ epoch_counter,        // [1]
-    int32_t* __restrict__ failures,             // [1] calls routed primary-only after a failed exchange
-    const int32_t* __restrict__ copy_physical,  // [L, C]
-    const int32_t* __restrict__ copy_rank,      // [L, C]
-    const int32_t* __restrict__ num_copies,     // [L]
-    const int32_t* __restrict__ replicated,     // [L]
-    const int32_t* __restrict__ num_replicated,  // [1]
-    int32_t* __restrict__ plan_out,
-    int32_t* __restrict__ stats_out,
-    int64_t num_ids,
-    int num_logical,
-    int num_ranks,
-    int rank,
-    int block_m,
-    int num_slots,
-    int max_moves,
-    long long timeout_ns) {
-  __shared__ TileShared s;
-  const int tid = threadIdx.x;
-  const int num_rep = min(max(num_replicated[0], 0), num_logical);
-  const int epoch = (epoch_counter[0] + 1) & 0xFFFF;
-  const int parity = epoch & 1;
-  const int tag = epoch << 16;
-  tile_init(s, num_logical);
-  __syncthreads();
-
-  // Local histogram (counts only; ordinals are recomputed deterministically in the rewrite).
-  for (int64_t i = tid; i < num_ids; i += kTileThreads) {
-    const int64_t id = static_cast<int64_t>(logical_topk_ids[i]);
-    if (id >= 0 && id < num_logical) atomicAdd(&s.local[id], 1);
-  }
-  __syncthreads();
-
-  // Publish: row ``rank`` of every peer's receive buffer, slot ``parity``.
-  const int row = (parity * num_ranks + rank) * num_logical;
-  for (int idx = tid; idx < num_ranks * num_logical; idx += kTileThreads) {
-    const int p = idx / num_logical;
-    if (p == rank) continue;
-    const int e = idx - p * num_logical;
-    int* dst = reinterpret_cast<int*>(peer_buffers[p]) + row + e;
-    tile_st_relaxed_sys(dst, tag | min(s.local[e], kTileCountMax));
-  }
-  // Stage the placement tables while the peers' words are in flight.
-  tile_load_tables(s, copy_physical, copy_rank, num_copies, replicated, num_rep, num_logical);
-
-  // Gather: poll this rank's own buffer until every peer's word carries ``epoch``.
-  const int* inbox = reinterpret_cast<const int*>(peer_buffers[rank]) + parity * num_ranks * num_logical;
-  volatile int* failed = &s.failed;
-  const unsigned long long start = tile_globaltimer();
-  for (int base = 0; base < num_logical; base += kTileThreads) {
-    const int e = base + tid;
-    int total = 0;
-    int prefix = 0;
-    int bad = e < num_logical ? 0 : -1;
-    for (int r0 = 0; r0 < num_ranks; r0 += 8) {
-      int word[8];
-#pragma unroll
-      for (int j = 0; j < 8; ++j) {
-        const int r = r0 + j;
-        word[j] = (bad == 0 && r < num_ranks && r != rank) ? tile_ld_relaxed_sys(inbox + r * num_logical + e) : 0;
-      }
-#pragma unroll
-      for (int j = 0; j < 8; ++j) {
-        const int r = r0 + j;
-        if (r >= num_ranks || bad != 0) continue;
-        int c;
-        if (r == rank) {
-          c = min(s.local[e], kTileCountMax);
-        } else {
-          int w = word[j];
-          while ((static_cast<unsigned>(w) >> 16) != static_cast<unsigned>(epoch)) {
-            const int ahead = static_cast<int16_t>(static_cast<uint16_t>((static_cast<unsigned>(w) >> 16) - epoch));
-            if (ahead > 0) {
-              bad = kTileFailOverwritten;
-              break;
-            }
-            if (*failed != 0) {
-              bad = -1;  // another thread gave up; the call is primary-only anyway
-              break;
-            }
-            if (static_cast<long long>(tile_globaltimer() - start) > timeout_ns) {
-              bad = kTileFailTimeout;
-              break;
-            }
-            w = tile_ld_relaxed_sys(inbox + r * num_logical + e);
-          }
-          c = w & 0xFFFF;
-        }
-        if (bad == 0 && c >= kTileCountMax) bad = kTileFailOverflow;
-        total += c;
-        prefix += r < rank ? c : 0;
-      }
-    }
-    if (bad > 0) {
-      if (atomicOr(&s.failed, bad) == 0 && bad != kTileFailOverflow) {
-        printf("evenmoe tile_repair: P2P count exchange failed on rank %d (epoch %d, reason %d); "
-               "this call routes primary-only\n", rank, epoch, bad);
-      }
-    }
-    if (e < num_logical) {
-      s.total[e] = total;
-      s.prefix[e] = prefix;
-    }
-    tile_warp_add(&s.grand_total, e < num_logical ? total : 0);
-  }
-  __syncthreads();
-
-  if (s.failed == 0) {
-    tile_plan(s, num_rep, num_logical, num_ranks, block_m, num_slots, max_moves);
-  } else {
-    // Primary-only: no replicated expert, no tiles, no moves.
-    for (int e = tid; e < num_logical; e += kTileThreads) s.rep_index[e] = -1;
-    if (tid < kTileMaxRanks) s.tiles[tid] = 0;
-    if (tid == 0) {
-      s.tile_sum = 0;
-      s.block_m = block_m > 0 ? block_m : 0;
-      atomicAdd(failures, 1);
-    }
-    __syncthreads();
-  }
-  tile_write_plan(s, plan_out, stats_out, num_logical, num_ranks);
-  tile_rewrite<InT, OutT>(s, logical_topk_ids, routed, num_ids, num_logical);
-  if (tid == 0) epoch_counter[0] = epoch;
-}
-
 // tvm-ffi entry point. ``plan_out`` is ``[L, C]`` int32 or empty; ``stats_out``
 // is ``[kTileStats + R]`` int32 or empty. ``block_m == 0`` is adaptive.
 template <typename InT, typename OutT>
@@ -688,100 +516,6 @@ void tile_repair_route(tvm::ffi::TensorView logical_topk_ids,
       static_cast<int>(block_m),
       static_cast<int>(num_slots),
       static_cast<int>(max_moves));
-}
-
-// tvm-ffi entry point of the fused P2P path. ``peer_buffers`` is ``[R]`` int64
-// device addresses of every rank's receive buffer (``buffer_words`` int32 each,
-// at least ``2 * R * L``), all mapped into this process; ``epoch_counter`` and
-// ``failures`` are ``[1]`` int32 device scalars owned by this rank.
-template <typename InT, typename OutT>
-void tile_repair_route_p2p(tvm::ffi::TensorView logical_topk_ids,
-                           tvm::ffi::TensorView routed,
-                           tvm::ffi::TensorView peer_buffers,
-                           tvm::ffi::TensorView epoch_counter,
-                           tvm::ffi::TensorView failures,
-                           tvm::ffi::TensorView copy_physical,
-                           tvm::ffi::TensorView copy_rank,
-                           tvm::ffi::TensorView num_copies,
-                           tvm::ffi::TensorView replicated,
-                           tvm::ffi::TensorView num_replicated,
-                           tvm::ffi::TensorView plan_out,
-                           tvm::ffi::TensorView stats_out,
-                           int64_t rank,
-                           int64_t buffer_words,
-                           int64_t block_m,
-                           int64_t num_slots,
-                           int64_t max_moves,
-                           int64_t timeout_ns) {
-  using namespace host;
-
-  SymbolicDevice device_;
-  auto num_tokens = SymbolicSize{"num_tokens"};
-  auto top_k = SymbolicSize{"top_k"};
-  auto num_logical = SymbolicSize{"num_logical_experts"};
-  auto num_ranks = SymbolicSize{"num_ranks"};
-  auto max_copies = SymbolicSize{"max_copies"};
-  auto num_plan = SymbolicSize{"num_plan"};
-  auto num_stats = SymbolicSize{"num_stats"};
-  TensorMatcher({num_tokens, top_k}).with_device<kDLCUDA>(device_).with_dtype<InT>().verify(logical_topk_ids);
-  TensorMatcher({num_tokens, top_k}).with_device<kDLCUDA>(device_).with_dtype<OutT>().verify(routed);
-  TensorMatcher({num_ranks}).with_dtype<int64_t>().with_device<kDLCUDA>(device_).verify(peer_buffers);
-  TensorMatcher({1}).with_dtype<int32_t>().with_device<kDLCUDA>(device_).verify(epoch_counter);
-  TensorMatcher({1}).with_dtype<int32_t>().with_device<kDLCUDA>(device_).verify(failures);
-  TensorMatcher({num_logical, max_copies}).with_dtype<int32_t>().with_device<kDLCUDA>(device_).verify(copy_physical);
-  TensorMatcher({num_logical, max_copies}).with_dtype<int32_t>().with_device<kDLCUDA>(device_).verify(copy_rank);
-  TensorMatcher({num_logical}).with_dtype<int32_t>().with_device<kDLCUDA>(device_).verify(num_copies);
-  TensorMatcher({num_logical}).with_dtype<int32_t>().with_device<kDLCUDA>(device_).verify(replicated);
-  TensorMatcher({1}).with_dtype<int32_t>().with_device<kDLCUDA>(device_).verify(num_replicated);
-  TensorMatcher({num_plan}).with_dtype<int32_t>().with_device<kDLCUDA>(device_).verify(plan_out);
-  TensorMatcher({num_stats}).with_dtype<int32_t>().with_device<kDLCUDA>(device_).verify(stats_out);
-
-  const int64_t logical = num_logical.unwrap();
-  const int64_t ranks = num_ranks.unwrap();
-  const int64_t tokens = num_tokens.unwrap();
-  const int64_t k = top_k.unwrap();
-  RuntimeCheck(logical > 0 && logical <= kTileMaxLogical,
-               "tile_repair supports 1..", kTileMaxLogical, " logical experts, got ", logical);
-  RuntimeCheck(ranks > 0 && ranks <= kTileMaxRanks, "tile_repair supports 1..", kTileMaxRanks, " ranks, got ", ranks);
-  RuntimeCheck(max_copies.unwrap() == kTileMaxCopies, "copy tables must have ", kTileMaxCopies, " columns");
-  RuntimeCheck(num_plan.unwrap() == 0 || num_plan.unwrap() == logical * kTileMaxCopies,
-               "plan_out must be empty or [num_logical * ", kTileMaxCopies, "]");
-  RuntimeCheck(num_stats.unwrap() == 0 || num_stats.unwrap() == kTileStats + ranks,
-               "stats_out must be empty or [", kTileStats, " + num_ranks]");
-  RuntimeCheck(rank >= 0 && rank < ranks, "rank out of range: ", rank);
-  RuntimeCheck(buffer_words >= 2 * ranks * logical, "P2P receive buffers hold ", buffer_words,
-               " words, need 2 * num_ranks * num_logical = ", 2 * ranks * logical);
-  RuntimeCheck(block_m >= 0 && block_m <= (1 << 20), "block_m out of range: ", block_m);
-  RuntimeCheck(block_m > 0 || (num_slots > 0 && num_slots <= (1 << 24)), "adaptive block_m needs num_slots > 0");
-  RuntimeCheck(max_moves >= 0 && max_moves <= (1 << 20), "max_moves out of range: ", max_moves);
-  RuntimeCheck(timeout_ns > 0, "timeout_ns must be positive");
-  RuntimeCheck(tokens * k < (int64_t{1} << 31), "too many TopK entries for one launch");
-  RuntimeCheck(logical_topk_ids.data_ptr() != routed.data_ptr() || tokens * k == 0,
-               "logical_topk_ids and routed must not alias");
-
-  const DLDevice device = device_.unwrap();
-  LaunchKernel(/*grid=*/1, /*block=*/kTileThreads, device)(
-      tile_repair_route_p2p_kernel<InT, OutT>,
-      static_cast<const InT*>(logical_topk_ids.data_ptr()),
-      static_cast<OutT*>(routed.data_ptr()),
-      static_cast<const int64_t*>(peer_buffers.data_ptr()),
-      static_cast<int32_t*>(epoch_counter.data_ptr()),
-      static_cast<int32_t*>(failures.data_ptr()),
-      static_cast<const int32_t*>(copy_physical.data_ptr()),
-      static_cast<const int32_t*>(copy_rank.data_ptr()),
-      static_cast<const int32_t*>(num_copies.data_ptr()),
-      static_cast<const int32_t*>(replicated.data_ptr()),
-      static_cast<const int32_t*>(num_replicated.data_ptr()),
-      num_plan.unwrap() > 0 ? static_cast<int32_t*>(plan_out.data_ptr()) : nullptr,
-      num_stats.unwrap() > 0 ? static_cast<int32_t*>(stats_out.data_ptr()) : nullptr,
-      tokens * k,
-      static_cast<int>(logical),
-      static_cast<int>(ranks),
-      static_cast<int>(rank),
-      static_cast<int>(block_m),
-      static_cast<int>(num_slots),
-      static_cast<int>(max_moves),
-      static_cast<long long>(timeout_ns));
 }
 
 }  // namespace

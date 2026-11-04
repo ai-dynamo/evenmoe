@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 import random
+import subprocess
+import sys
+from dataclasses import replace
 
 import pytest
 import torch
@@ -18,6 +22,7 @@ from evenmoe.core.policy import ExpertDeploymentConfig
 from evenmoe.kernels.tile_repair import (
     MAX_COPIES,
     NUM_STATS,
+    adaptive_block_m,
     build_tile_repair_tables,
     tile_repair_plan_reference,
     tile_repair_route,
@@ -402,14 +407,14 @@ def test_pipeline_declarations():
     assert capabilities.consumes_global_logical_count
     assert capabilities.requires_placement_state
     assert capabilities.graph_stability == "stable"
-    assert not capabilities.supports_concurrent_microbatches
+    assert capabilities.supports_concurrent_microbatches
     assert not capabilities.dispatch_fixed_by_placement
     reason = pipeline.is_applicable(ExpertDeploymentConfig(num_redundant_experts=0))
     assert reason is not None and "redundant" in reason
     assert pipeline.is_applicable(ExpertDeploymentConfig(num_redundant_experts=32)) is None
     combined = RoutingPipeline.from_value("tile_repair+waterfill")
     assert combined.policies == ("tile_repair", "waterfill")
-    assert not combined.capabilities.supports_concurrent_microbatches
+    assert combined.capabilities.supports_concurrent_microbatches
 
 
 def test_routers_on_every_rank_build_the_same_tables():
@@ -483,7 +488,6 @@ def test_cuda_kernel_matches_reference(block_m, ranks, num_logical, extras):
                 plan.primary_peak,
                 plan.peak,
                 block_m,
-                0,
                 *plan.rank_tiles.tolist(),
             ]
             outputs.append(out)
@@ -653,15 +657,11 @@ def test_cuda_graph_keeps_collective_when_copy_ranks_change(start_with_remote_co
 
 
 @cuda
-@pytest.mark.parametrize("logical,ranks,p2p", [(1024, 2, False), (1024, 2, True), (256, 64, False)])
-def test_unsupported_geometry_skips_exchange_and_replays_primary_mapping(logical, ranks, p2p):
-    from evenmoe.kernels.tile_repair.p2p import local_peer_exchanges
-
-    exchange = local_peer_exchanges(ranks)[0] if p2p else None
+@pytest.mark.parametrize("logical,ranks", [(1024, 2), (256, 64)])
+def test_unsupported_geometry_skips_exchange_and_replays_primary_mapping(logical, ranks):
     # No collectives: asking for a count is itself a regression on this path.
     mlb = MoELoadBalancer.from_algorithm(
         "tile_repair", ep_size=ranks, source_rank=0, experts_per_rank=logical // ranks + 1,
-        tile_p2p_exchange=exchange,
     )
     ids = torch.tensor([[0, logical - 1], [7, -1]], device="cuda")
     first = _snapshot(
@@ -685,5 +685,90 @@ def test_unsupported_geometry_skips_exchange_and_replays_primary_mapping(logical
         assert not decision.metadata["tile_repair"]
         assert torch.equal(decision.routed_physical_topk_ids, expected)
         assert torch.equal(captured, expected)
-    if exchange is not None:
-        assert int(exchange.epoch.item()) == 0
+
+
+@pytest.mark.parametrize(
+    "rows,slots,expected",
+    [(0, 288, 8), (1583, 288, 8), (1584, 288, 16), (3657, 288, 16), (3658, 288, 32),
+     (8179, 288, 32), (8180, 288, 48), (23039, 288, 48), (23040, 288, 64), (10**6, 288, 64)],
+)
+def test_adaptive_block_m_buckets(rows, slots, expected):
+    # em = rows / slots against 5.5 / 12.7 / 28.4 / 80 in exact integer compares.
+    assert adaptive_block_m(rows, slots) == expected
+
+
+def test_adaptive_plan_reference_resolves_block_m():
+    ranks, num_logical = 8, 256
+    p2l = _random_p2l(num_logical, ranks, 4, seed=3)
+    tables = build_tile_repair_tables(
+        torch.tensor(p2l), num_logical=num_logical, num_ranks=ranks, num_local_physical_experts=36
+    )
+    for tokens, seed in ((4, 1), (16, 2), (64, 3), (512, 4)):
+        _, counts = _ep_batch(ranks, num_logical, seed=seed, tokens=[tokens] * ranks)
+        bm = adaptive_block_m(int(counts.sum()), len(p2l))
+        adaptive = tile_repair_plan_reference(
+            counts, tables, block_m=0, max_moves=32, num_slots=len(p2l)
+        )
+        fixed = tile_repair_plan_reference(counts, tables, block_m=bm, max_moves=32)
+        assert adaptive.block_m == bm
+        assert torch.equal(adaptive.copy_tokens, fixed.copy_tokens)
+    with pytest.raises(ValueError, match="num_slots"):
+        tile_repair_plan_reference(counts, tables, block_m=0, max_moves=32)
+
+
+@cuda
+@pytest.mark.parametrize("block_m", [0, 64])
+def test_router_owns_scratch_per_concurrent_microbatch(block_m):
+    ranks, logical = 4, 64
+    p2l = _random_p2l(logical, ranks, 4, seed=17)
+    placement = _snapshot(p2l, num_logical=logical, ranks=ranks, device="cuda")
+    router = TileRepairL2Router(num_ranks=ranks, source_rank=0, block_m=block_m)
+    router.prepare_layer(placement)
+    policy = RoutingPolicyConfig(name="tile_repair")
+    tables = tables_from_snapshot(placement)
+    pending = []
+    for seed in range(2):
+        ids, counts = _ep_batch(ranks, logical, seed=seed, tokens=[16 + seed * 64] * ranks)
+        expected = tile_repair_route_reference(
+            ids[0], counts, tables, source_rank=0, block_m=block_m, max_moves=32,
+            num_slots=len(p2l),
+        )
+        request = replace(
+            _routing_request(ids[0].cuda(), placement), global_logical_count=counts.cuda()
+        )
+        router.route_tokens(request, policy)  # compile before capturing
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            output = router.route_tokens(request, policy).routed_physical_topk_ids
+        pending.append((stream, graph, request, output, expected))
+    torch.cuda.synchronize()
+    for _ in range(4):
+        for stream, graph, _, _, _ in pending:
+            with torch.cuda.stream(stream):
+                graph.replay()
+    torch.cuda.synchronize()
+    for _, _, _, output, expected in pending:
+        assert torch.equal(output.cpu(), expected)
+
+
+@pytest.mark.multi_gpu
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.device_count() < 2,
+    reason="requires two or more CUDA devices",
+)
+def test_collective_graph_placement_updates_across_processes(tmp_path):
+    world = min(torch.cuda.device_count(), 8)
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [os.path.join(os.path.dirname(__file__), "..", "src"), env.get("PYTHONPATH", "")]
+    )
+    proc = subprocess.run(
+        [sys.executable, "-m", "torch.distributed.run", "--standalone", f"--nproc-per-node={world}",
+         os.path.join(os.path.dirname(__file__), "multigpu_tile_repair.py"), str(tmp_path)],
+        env=env, capture_output=True, text=True, timeout=900, check=False,
+    )
+    assert proc.returncode == 0, proc.stdout[-4000:] + proc.stderr[-4000:]
+    results = sorted(tmp_path.glob("rank*.ok"))
+    assert len(results) == world, proc.stdout[-2000:] + proc.stderr[-2000:]

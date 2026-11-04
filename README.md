@@ -160,27 +160,29 @@ LPLB requires redundant replicas (`--ep-num-redundant-experts > 0`) and a record
 
 #### Tile-aware placement and routing (decode)
 
-In decode an expert sees a handful of tokens, and the grouped GEMM pays for whole `BLOCK_M`-row tiles, so a rank's MoE time follows its number of tiles `Σ ceil(m / BLOCK_M)` rather than its token count; token-balanced EPLB plus redundancy can even be slower than no redundancy. The `tile` placement packs experts by *expected tiles* (EPLB without redundancy) and spends the redundant slots as `X = redundant / ep_size` extra copies per rank of the experts with the most expected tiles. `tile_repair` then routes every token to its expert's primary copy and moves single partial tiles of replicated experts off the busiest rank while that strictly lowers its tile count (never worse than primary-only routing), with exact per-copy quotas computed identically on every rank from the per-source-rank counts `[ep_size, num_logical]` of the layer. By default those counts are gathered with one framework all-reduce per layer; with `EVENMOE_TILE_P2P=1` and all EP ranks in one NVLink domain, one fused launch per layer counts, exchanges the counts over NVLink (torch symmetric memory on the EP group), plans and rewrites instead — 5–7.5 µs per layer over a plain static gather on 8×H20, against 24–27 µs when the all-reduce is plain NCCL. A framework with a fast in-graph small all-reduce (SGLang's custom all-reduce) gets close to the P2P path end to end; the P2P path makes the cost independent of the framework's collective. A late peer (first-use JIT, for example) makes the waiting ranks route that call primary-only after `EVENMOE_TILE_P2P_TIMEOUT_MS` (2000 ms); routing stays valid and the next call is back in step. Across hosts, or without symmetric memory, every rank keeps the all-reduce path.
+Decode GEMMs execute whole tiles even when an expert receives only a few tokens.
+`tile` places experts by their expected tile load and adds redundant copies.
+`tile_repair` starts from each expert's primary copy and shifts tokens to replicas
+when doing so reduces the busiest rank's tile load. Each layer gathers per-rank
+counts through the framework's all-reduce, then plans and routes in one CUDA kernel.
 
-`tile_repair` requires serialized microbatches: its optional P2P exchange shares an epoch and receive buffer across layers. On supported geometries, every layer with extra physical slots participates in the exchange, even when its current duplicates are all on the same rank. This keeps eager calls and CUDA Graph replay consistent when a same-shape placement update moves those copies to other ranks. CUDA geometries above 512 logical experts or 32 ranks route primary-only without a count exchange.
+Select `--eplb-algorithm tile` (or a recorded tile placement) together with
+`--moe-load-balancer-algorithm tile_repair` and redundant experts, e.g.
+`--ep-num-redundant-experts 32` at EP8. Placement and routing must use the same
+GEMM tile height; DeepGEMM on H20 uses 64.
 
-Select `--moe-load-balancer-algorithm tile_repair` with `--ep-num-redundant-experts = X × ep_size` (for example 32 at EP8), and either `--eplb-algorithm tile` or an `--init-expert-location` file produced by the `tile` planner. Placement and routing must agree on the tile size; both read the knobs below (routing policy metadata or `PlacementPolicyConfig.metadata` override the environment).
+| Environment variable | Default | Purpose |
+|:---|:---|:---|
+| `EVENMOE_TILE_BLOCK_M` | `64` | GEMM tile height; `0` selects adaptive sizing |
+| `EVENMOE_TILE_MAX_MOVES` | `32` | Maximum repair moves per layer |
+| `EVENMOE_TILE_REPAIR_STAGES` | `decode,idle,speculative` | Stages that repair; others route primary-only |
+| `EVENMOE_TILE_TOKENS_PER_PASS` | `128 × ep_size` | Expected routed token/expert pairs for placement |
 
-| Knob | Environment variable | Default | Meaning |
-|:---|:---|:---|:---|
-| `block_m` | `EVENMOE_TILE_BLOCK_M` | `64` | M tile of the MoE grouped GEMM on each rank; `0` = adaptive (8/16/32/48/64 by expected rows per physical slot, per call) |
-| `max_moves` | `EVENMOE_TILE_MAX_MOVES` | `32` | Repair moves per layer per forward |
-| `stages` | `EVENMOE_TILE_REPAIR_STAGES` | `decode,idle,speculative` | Stages that repair (`all` for every stage); other stages route to primary copies but still join the count collective |
-| `tokens_per_pass` | `EVENMOE_TILE_TOKENS_PER_PASS` | `128 × ep_size` | Placement only: expected routed (token, expert) pairs per forward on the whole EP group |
-| `p2p` | `EVENMOE_TILE_P2P` | off | Exchange the counts over NVLink inside the routing launch (one NVLink domain; needs the EP process group from `RoutingCollectives.device_group` or the build option `ep_process_group`) |
-| `p2p` timeout | `EVENMOE_TILE_P2P_TIMEOUT_MS` | `2000` | How long a rank waits for a peer's counts before routing that call primary-only |
-
-| MoE GEMM backend | `block_m` |
-|:---|:---|
-| DeepGEMM SM90 FP8 masked grouped GEMM (Hopper, e.g. H20/H100/H200) | `64` |
-| DeepGEMM SM100 grouped GEMM (Blackwell) | `128` |
-| Swap-AB / small-M grouped GEMM kernels | the kernel's M tile (`8`, `16` or `32`) |
-| Autotuned kernels (e.g. Humming) | `0` (adaptive), or the tile the tuner picks for decode batches (`8`–`64`) |
+Policy metadata overrides these defaults. Every supported layer with extra slots
+joins the count collective, including empty batches and primary-only stages.
+CUDA supports up to 512 logical experts, 32 ranks and four distinct-rank copies
+per expert; larger geometries route primary-only. vLLM's precomputed 1-D counts
+need adapter changes to supply the required per-rank counts.
 
 ### vLLM
 

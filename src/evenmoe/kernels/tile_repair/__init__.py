@@ -24,8 +24,7 @@ Layout:
                       and their tvm-ffi entry points; compiled per (id dtype,
                       output dtype). ``block_m``, ``max_moves`` and the source
                       rank are runtime arguments. ``tile_repair_route`` reads
-                      gathered counts; ``tile_repair_route_p2p``
-                      (:mod:`.p2p`) gathers them itself over NVLink.
+                      counts gathered by the framework.
 - :func:`tile_repair_plan_reference` / :func:`tile_repair_route_reference`
   are bit-exact host mirrors of the kernel used as the test oracle and as the
   CPU path.
@@ -57,19 +56,9 @@ MAX_COPIES = 4
 """Distinct-rank copies per logical expert the router can use. Copies on
 further ranks (lowest local index first) are never routed to."""
 
-NUM_STATS = 6
-"""Leading entries of the optional stats output: moves, lower bound,
-primary-only peak tiles, final peak tiles, the ``block_m`` used, and the P2P
-exchange failure bits (:data:`P2P_FAIL_TIMEOUT` | :data:`P2P_FAIL_OVERWRITTEN`
-| :data:`P2P_FAIL_OVERFLOW`; always 0 on the gathered-count path); per-rank
-tiles follow."""
-
-P2P_FAIL_TIMEOUT = 1
-"""A peer's count did not arrive within the timeout."""
-P2P_FAIL_OVERWRITTEN = 2
-"""A peer had already moved on to a later call (this call's data is gone)."""
-P2P_FAIL_OVERFLOW = 4
-"""Some rank had 0xFFFF or more entries of one expert (the 16-bit count field)."""
+NUM_STATS = 5
+"""Leading stats: moves, lower bound, primary-only peak tiles, final peak tiles,
+and the ``block_m`` used; per-rank tiles follow."""
 
 ADAPTIVE_BLOCK_M = 0
 """``block_m`` value that selects the tile height per call."""
@@ -404,7 +393,6 @@ def _route_module(in_dtype: torch.dtype, out_dtype: torch.dtype) -> Module:
         cuda_files=["route.cuh"],
         cuda_wrappers=[
             ("tile_repair_route", f"tile_repair_route<{args}>"),
-            ("tile_repair_route_p2p", f"tile_repair_route_p2p<{args}>"),
         ],
         source_root=_HERE,
     )
@@ -505,9 +493,6 @@ __all__ = [
     "MAX_LOGICAL",
     "MAX_RANKS",
     "NUM_STATS",
-    "P2P_FAIL_OVERFLOW",
-    "P2P_FAIL_OVERWRITTEN",
-    "P2P_FAIL_TIMEOUT",
     "TileRepairPlan",
     "TileRepairTables",
     "adaptive_block_m",
