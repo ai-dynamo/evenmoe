@@ -39,13 +39,12 @@ from evenmoe.core.types import (
     RoutingStage,
 )
 from evenmoe.kernels.metro_repair import (
-    MetroRepairTables,
-    build_metro_repair_tables,
     metro_repair_assign_reference,
     metro_repair_route,
     supports,
 )
-from evenmoe.kernels.ops.metro import build_metro_tables, metro_route
+from evenmoe.kernels.ops.metro import metro_route, metro_workspace
+from evenmoe.policies.l2.metro import MetroTables, _check_candidates, build_metro_tables
 from evenmoe.policies.l2.replica import route_static_replicas
 
 logger = logging.getLogger(__name__)
@@ -55,57 +54,50 @@ _STATIC_STAGES = frozenset({RoutingStage.PREFILL, RoutingStage.MIXED})
 DEFAULT_MOVES = 32
 
 
+@dataclass(frozen=True)
+class MetroRepairTables:
+    """METRO tables plus dense physical copies and single-word repair masks."""
+
+    metro: MetroTables
+    physical_by_rank: Tensor
+    holder_mask: Tensor
+
+    def operands(self) -> dict[str, Tensor]:
+        return {
+            "holder_mask": self.holder_mask,
+            "physical_by_rank": self.physical_by_rank,
+            "default_physical": self.metro.default_physical,
+        }
+
+    def tensors(self) -> tuple[Tensor, ...]:
+        return (*self.metro.tensors(), self.physical_by_rank, self.holder_mask)
+
+
+def build_metro_repair_tables(metro: MetroTables) -> MetroRepairTables:
+    """Recover dense copies from the shared METRO tables, without rebuilding placement."""
+
+    device = metro.default_physical.device
+    physical = torch.full(
+        (metro.num_logical, metro.num_ranks), -1, dtype=torch.int32, device=device
+    )
+    single = metro.single_rank >= 0
+    logical = torch.arange(metro.num_logical, device=device)[single]
+    physical[logical, metro.single_rank[single].long()] = metro.default_physical[single]
+    count = int(metro.num_replicated.item())
+    physical[metro.rep_logical[:count].long()] = metro.rep_phys[:count]
+    mask = torch.zeros(metro.num_logical, dtype=torch.int32, device=device)
+    if metro.num_ranks <= 32:
+        bits = 1 << torch.arange(metro.num_ranks, dtype=torch.int64, device=device)
+        words = ((physical >= 0).to(torch.int64) * bits).sum(dim=1)
+        mask = torch.where(words >= 2**31, words - 2**32, words).to(torch.int32)
+    return MetroRepairTables(metro, physical, mask.contiguous())
+
+
 @dataclass
 class _LayerState:
     tables: MetroRepairTables
     has_redundancy: bool
-
-
-def rank_invariant_candidates(snapshot: PlacementSnapshot) -> Tensor:
-    """``[L, max_copies]`` candidate table rebuilt from the physical->logical map.
-
-    Every live entry of ``snapshot.logical_to_physical_candidates`` must be a
-    copy of its logical expert under that map; the rebuilt table lists every
-    copy, so it is the same on every rank.
-    """
-
-    p2l = snapshot.physical_to_logical_map
-    p2l = (p2l if isinstance(p2l, Tensor) else torch.as_tensor(p2l)).reshape(-1).to(torch.int64)
-    num_logical = snapshot.num_logical_experts
-    if p2l.numel() != snapshot.num_physical_experts:
-        raise ValueError(
-            f"physical_to_logical_map has {p2l.numel()} entries for "
-            f"{snapshot.num_physical_experts} physical experts."
-        )
-    host = p2l.cpu()
-    if bool(((host < 0) | (host >= num_logical)).any()):
-        raise ValueError("physical_to_logical_map holds an out-of-range logical expert.")
-
-    listed = snapshot.logical_to_physical_candidates
-    listed = (
-        (listed if isinstance(listed, Tensor) else torch.as_tensor(listed)).to(torch.int64).cpu()
-    )
-    count = snapshot.logical_to_physical_count
-    if isinstance(count, Tensor) and listed.dim() == 2 and listed.shape[1] > 1:
-        column = torch.arange(listed.shape[1]).view(1, -1)
-        listed = torch.where(column < count.cpu().view(-1, 1), listed, -1)
-    live = listed >= 0
-    owner = torch.arange(listed.shape[0]).view(-1, 1).expand_as(listed)
-    if bool((host[listed.clamp(0, host.numel() - 1)][live] != owner[live]).any()):
-        raise ValueError("logical_to_physical_candidates disagrees with physical_to_logical_map.")
-
-    copies = torch.bincount(host, minlength=num_logical)
-    if bool((copies == 0).any()):
-        raise ValueError("Every logical expert must have at least one physical copy.")
-    order = torch.argsort(
-        host * host.numel() + torch.arange(host.numel())
-    )  # by logical, then physical
-    rank_in_logical = torch.arange(host.numel()) - torch.repeat_interleave(
-        torch.cumsum(copies, 0) - copies, copies
-    )
-    table = torch.full((num_logical, int(copies.max())), -1, dtype=torch.int64)
-    table[host[order], rank_in_logical] = order
-    return table.to(p2l.device)
+    workspace: Tensor
 
 
 class MetroRepairL2Router(TokenRouter):
@@ -204,20 +196,7 @@ class MetroRepairL2Router(TokenRouter):
         gate = token_count if isinstance(token_count, Tensor) else None
 
         metro = state.tables.metro
-        if not topk_ids.is_cuda:
-            physical = _route_host(topk_ids, counts, state.tables, gate, moves, early_exit)
-            physical = physical.to(out_dtype)
-        elif supports(metro.num_logical, metro.num_ranks):
-            physical = metro_repair_route(
-                topk_ids,
-                state.tables,
-                counts=counts,
-                num_token_non_padded=gate,
-                moves=moves,
-                early_exit=early_exit,
-                out_dtype=out_dtype,
-            )
-        else:
+        if not supports(metro.num_logical, metro.num_ranks):
             if not self._warned_fallback:
                 logger.warning(
                     "METRO-repair kernel covers <= 256 experts and <= 32 ranks; "
@@ -230,11 +209,25 @@ class MetroRepairL2Router(TokenRouter):
             physical = metro_route(
                 topk_ids,
                 counts,
-                metro,
+                **metro.operands(),
                 num_token_non_padded=gate,
+                workspace=state.workspace,
                 out_dtype=out_dtype,
             )
             moves = 0
+        elif not topk_ids.is_cuda:
+            physical = _route_host(topk_ids, counts, state.tables, gate, moves, early_exit)
+            physical = physical.to(out_dtype)
+        else:
+            physical = metro_repair_route(
+                topk_ids,
+                **state.tables.operands(),
+                counts=counts,
+                num_token_non_padded=gate,
+                moves=moves,
+                early_exit=early_exit,
+                out_dtype=out_dtype,
+            )
         return RoutingDecision(
             routed_physical_topk_ids=physical,
             topk_weights=request.topk_weights,
@@ -254,10 +247,20 @@ class MetroRepairL2Router(TokenRouter):
                 f"Placement ep_size={snapshot.ep_size} does not match the router's "
                 f"num_gpus={self.num_gpus}."
             )
-        candidates = rank_invariant_candidates(snapshot)
-        metro = build_metro_tables(candidates, snapshot.num_physical_experts, snapshot.ep_size)
+        p2l = snapshot.physical_to_logical_map
+        p2l = (p2l if isinstance(p2l, Tensor) else torch.as_tensor(p2l)).reshape(-1)
+        if p2l.numel() != snapshot.num_physical_experts:
+            raise ValueError("physical_to_logical_map size does not match num_physical_experts.")
+        _check_candidates(snapshot, p2l)
+        metro = build_metro_tables(p2l, snapshot.num_logical_experts, snapshot.ep_size)
         tables = build_metro_repair_tables(metro)
-        return _LayerState(tables=tables, has_redundancy=int(metro.num_replicated.item()) > 0)
+        return _LayerState(
+            tables=tables,
+            has_redundancy=int(metro.num_replicated.item()) > 0,
+            workspace=metro_workspace(
+                metro.num_logical, metro.num_ranks, metro.capacity, p2l.device
+            ),
+        )
 
 
 def _route_host(
@@ -270,9 +273,9 @@ def _route_host(
 ) -> Tensor:
     metro = tables.metro
     _, owner = metro_repair_assign_reference(
-        counts.detach().cpu() > 0, tables, moves=moves, early_exit=early_exit
+        counts.detach().cpu() > 0, tables.physical_by_rank, moves=moves, early_exit=early_exit
     )
-    by_rank = metro.physical_by_rank.cpu().long()
+    by_rank = tables.physical_by_rank.cpu().long()
     default = metro.default_physical.cpu().long()
     logical = torch.arange(metro.num_logical)
     owner = owner.long()
@@ -305,6 +308,8 @@ ROUTING_POLICY = RoutingPolicySpec(
     # Prefill and mixed steps fall back to the framework's static replica map.
     requires_rank_dispatch_map=True,
     requires_deepep=True,
+    # The METRO fallback reuses a per-layer workspace.
+    supports_concurrent_microbatches=False,
     requires_redundancy=True,
     build_router=_build_router,
 )

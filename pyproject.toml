@@ -59,6 +59,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 "evenmoe.kernels.jit" = ["include/evenmoe_jit/*"]
 "evenmoe.kernels.lplb" = ["csrc/*.cuh"]
+"evenmoe.kernels.metro_repair" = ["csrc/*.cuh"]
 "evenmoe.kernels.ultraep" = [
     "LICENSE.ultraep",
     "csrc/*.cuh",

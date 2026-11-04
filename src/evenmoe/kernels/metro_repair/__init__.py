@@ -32,14 +32,12 @@ Layout:
 from __future__ import annotations
 
 import pathlib
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
 from torch import Tensor
 
 from evenmoe.kernels.jit.utils import cache_once, load_jit, make_cpp_args
-from evenmoe.kernels.ops.metro import MetroTables
 
 if TYPE_CHECKING:
     from tvm_ffi.module import Module
@@ -51,33 +49,6 @@ MAX_LOGICAL = 256
 
 MAX_RANKS = 32
 """Ranks addressed by one warp lane each."""
-
-
-@dataclass(frozen=True)
-class MetroRepairTables:
-    """METRO's tables plus the per-expert holder bitmask the repair walks.
-
-    ``holder_mask[l]`` has bit ``g`` set when rank ``g`` holds a copy of ``l``
-    (int32; bit 31 reinterpreted as unsigned in CUDA).
-    """
-
-    metro: MetroTables
-    holder_mask: Tensor
-
-    def tensors(self) -> tuple[Tensor, ...]:
-        return (*self.metro.tensors(), self.holder_mask)
-
-
-def build_metro_repair_tables(metro: MetroTables) -> MetroRepairTables:
-    """Derive the holder bitmask from METRO's ``physical_by_rank`` table."""
-
-    has_copy = metro.physical_by_rank >= 0
-    bits = torch.ones(metro.num_ranks, dtype=torch.int64, device=has_copy.device) << torch.arange(
-        metro.num_ranks, device=has_copy.device
-    )
-    mask = (has_copy.to(torch.int64) * bits).sum(dim=1)
-    mask = torch.where(mask >= 2**31, mask - 2**32, mask).to(torch.int32)
-    return MetroRepairTables(metro=metro, holder_mask=mask.contiguous())
 
 
 def supports(num_logical: int, num_ranks: int) -> bool:
@@ -100,8 +71,10 @@ def _route_module(in_dtype: torch.dtype, out_dtype: torch.dtype, num_ranks: int)
 
 def metro_repair_route(
     logical_topk_ids: Tensor,
-    tables: MetroRepairTables,
     *,
+    holder_mask: Tensor,
+    physical_by_rank: Tensor,
+    default_physical: Tensor,
     counts: Tensor | None = None,
     num_token_non_padded: Tensor | None = None,
     moves: int = 32,
@@ -121,13 +94,13 @@ def metro_repair_route(
     stream; no host synchronization, so it is CUDA-graph safe.
     """
 
-    metro = tables.metro
+    num_logical, num_ranks = physical_by_rank.shape
     if not logical_topk_ids.is_cuda:
         raise ValueError("metro_repair_route runs on CUDA tensors; use the reference on CPU.")
-    if not supports(metro.num_logical, metro.num_ranks):
+    if not supports(num_logical, num_ranks):
         raise ValueError(
             f"METRO-repair supports <= {MAX_LOGICAL} experts and <= {MAX_RANKS} ranks; "
-            f"got {metro.num_logical} and {metro.num_ranks}."
+            f"got {num_logical} and {num_ranks}."
         )
     if logical_topk_ids.dtype not in (torch.int32, torch.int64):
         raise TypeError(f"logical_topk_ids must be int32 or int64, got {logical_topk_ids.dtype}.")
@@ -141,10 +114,8 @@ def metro_repair_route(
     if counts is None:
         counts_arg = torch.empty(0, dtype=torch.float32, device=device)
     else:
-        if counts.shape != (metro.num_logical,):
-            raise ValueError(
-                f"counts must have shape [{metro.num_logical}], got {tuple(counts.shape)}."
-            )
+        if counts.shape != (num_logical,):
+            raise ValueError(f"counts must have shape [{num_logical}], got {tuple(counts.shape)}.")
         counts_arg = counts if counts.dtype == torch.float32 else counts.to(torch.float32)
         counts_arg = counts_arg.contiguous()
     if num_token_non_padded is None:
@@ -153,16 +124,16 @@ def metro_repair_route(
         gate = num_token_non_padded.reshape(-1)[:1]
         gate = gate if gate.dtype == torch.int32 else gate.to(torch.int32)
     if rank_load is None:
-        rank_load = torch.empty(metro.num_ranks, dtype=torch.int32, device=device)
+        rank_load = torch.empty(num_ranks, dtype=torch.int32, device=device)
     out = torch.empty(ids.shape, dtype=out_dtype, device=device)
-    _route_module(ids.dtype, out_dtype, metro.num_ranks).metro_repair_route(
+    _route_module(ids.dtype, out_dtype, num_ranks).metro_repair_route(
         ids,
         out,
         counts_arg,
         gate,
-        tables.holder_mask,
-        metro.physical_by_rank,
-        metro.default_physical,
+        holder_mask,
+        physical_by_rank,
+        default_physical,
         rank_load,
         int(moves),
         bool(early_exit),
@@ -171,7 +142,7 @@ def metro_repair_route(
 
 
 def metro_repair_assign_reference(
-    active: Tensor, tables: MetroRepairTables, *, moves: int = 32, early_exit: bool = False
+    active: Tensor, physical_by_rank: Tensor, *, moves: int = 32, early_exit: bool = False
 ) -> tuple[Tensor, Tensor]:
     """Host oracle: ``([G] load, [L] owner rank or -1)`` for a ``[L]`` bool active set.
 
@@ -180,11 +151,11 @@ def metro_repair_assign_reference(
     order. ``early_exit=False`` runs every improving move up to ``moves``.
     """
 
-    metro = tables.metro
-    ranks = metro.num_ranks
+    ranks = int(physical_by_rank.shape[1])
     act = [bool(x) for x in active.detach().cpu().tolist()]
-    masks = [int(x) & 0xFFFFFFFF for x in tables.holder_mask.detach().cpu().tolist()]
-    holders = [[g for g in range(ranks) if (mask >> g) & 1] for mask in masks]
+    holders = [
+        [g for g, p in enumerate(row) if p >= 0] for row in physical_by_rank.detach().cpu().tolist()
+    ]
     owner = [-1] * len(act)
     load = [0] * ranks
     for e, live in enumerate(act):
@@ -211,7 +182,7 @@ def metro_repair_assign_reference(
             for dst in range(ranks):
                 if load[src] - load[dst] < 2:
                     continue
-                mid = 32 if (src, dst) in edge else -1
+                mid = ranks if (src, dst) in edge else -1
                 if mid < 0:
                     mid = next(
                         (m for m in range(ranks) if (src, m) in edge and (m, dst) in edge), -1
@@ -221,7 +192,7 @@ def metro_repair_assign_reference(
         if not paths:
             break
         _, _, src, dst, mid = min(paths)
-        if mid == 32:
+        if mid == ranks:
             owner[edge[src, dst]] = dst
         else:
             first, second = edge[src, mid], edge[mid, dst]
@@ -235,8 +206,6 @@ def metro_repair_assign_reference(
 __all__ = [
     "MAX_LOGICAL",
     "MAX_RANKS",
-    "MetroRepairTables",
-    "build_metro_repair_tables",
     "metro_repair_assign_reference",
     "metro_repair_route",
     "supports",

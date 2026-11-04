@@ -14,12 +14,12 @@ from evenmoe import (
     RoutingStage,
 )
 from evenmoe.kernels.metro_repair import (
-    build_metro_repair_tables,
     metro_repair_assign_reference,
     metro_repair_route,
 )
-from evenmoe.kernels.ops.metro import build_metro_tables, metro_assign_reference, metro_route
-from evenmoe.policies.l2.metro_repair import MetroRepairL2Router, rank_invariant_candidates
+from evenmoe.kernels.ops.metro import metro_assign_reference, metro_route
+from evenmoe.policies.l2.metro import build_metro_tables
+from evenmoe.policies.l2.metro_repair import MetroRepairL2Router, build_metro_repair_tables
 
 # Six logical experts on three ranks of three slots: rank 0 holds 0, 2, 3; rank 1
 # holds 1, 2, 4; rank 2 holds 0, 1, 5. With 0, 1, 2 active METRO's greedy
@@ -82,7 +82,7 @@ def _balancer(peer_contribution, algorithm="metro_repair"):
 
 
 def _tables(p2l=_P2L, candidates=_CANDIDATES, ranks=3):
-    return build_metro_repair_tables(build_metro_tables(torch.tensor(candidates), len(p2l), ranks))
+    return build_metro_repair_tables(build_metro_tables(torch.tensor(p2l), len(candidates), ranks))
 
 
 def _random_placement(num_logical, num_ranks, redundant, generator):
@@ -124,14 +124,21 @@ def test_zero_moves_is_metro():
     generator = torch.Generator().manual_seed(1)
     for ranks in (2, 3, 8, 16):
         p2l, candidates = _random_placement(64, ranks, 3 * ranks, generator)
-        metro = build_metro_tables(candidates, p2l.numel(), ranks)
+        metro = build_metro_tables(p2l, candidates.shape[0], ranks)
         tables = build_metro_repair_tables(metro)
         for _ in range(20):
             active = torch.rand(64, generator=generator) < torch.rand(1, generator=generator)
-            _, owner = metro_repair_assign_reference(active, tables, moves=0)
-            chosen = metro_assign_reference(active.float(), metro)
+            _, owner = metro_repair_assign_reference(active, tables.physical_by_rank, moves=0)
+            chosen = metro_assign_reference(
+                active.float(),
+                metro.default_physical,
+                metro.single_rank,
+                metro.rep_logical,
+                metro.rep_phys,
+                metro.num_replicated,
+            )
             live = torch.nonzero(active).flatten()
-            got = metro.physical_by_rank[live, owner[live].long()]
+            got = tables.physical_by_rank[live, owner[live].long()]
             assert torch.equal(got.long(), chosen[live])
 
 
@@ -140,8 +147,10 @@ def test_repair_finds_the_reachable_balance():
     tables = _tables()
     active = torch.tensor([True, True, True, False, False, False])
 
-    metro_load, metro_owner = metro_repair_assign_reference(active, tables, moves=0)
-    load, owner = metro_repair_assign_reference(active, tables, moves=32)
+    metro_load, metro_owner = metro_repair_assign_reference(
+        active, tables.physical_by_rank, moves=0
+    )
+    load, owner = metro_repair_assign_reference(active, tables.physical_by_rank, moves=32)
 
     assert metro_load.tolist() == [2, 1, 0]
     assert metro_owner.tolist() == [0, 1, 0, -1, -1, -1]
@@ -160,8 +169,8 @@ def test_two_hop_repair():
     tables = _tables(p2l, candidates)
     active = torch.tensor([True, True, True, False, False, False])
 
-    metro_load, _ = metro_repair_assign_reference(active, tables, moves=0)
-    load, owner = metro_repair_assign_reference(active, tables, moves=32)
+    metro_load, _ = metro_repair_assign_reference(active, tables.physical_by_rank, moves=0)
+    load, owner = metro_repair_assign_reference(active, tables.physical_by_rank, moves=32)
 
     assert metro_load.tolist() == [2, 1, 0]
     assert load.tolist() == [1, 1, 1]
@@ -173,12 +182,14 @@ def test_repair_never_raises_the_peak_and_early_exit_keeps_it():
     generator = torch.Generator().manual_seed(2)
     for ranks in (2, 4, 8):
         p2l, candidates = _random_placement(48, ranks, 2 * ranks, generator)
-        tables = build_metro_repair_tables(build_metro_tables(candidates, p2l.numel(), ranks))
+        tables = build_metro_repair_tables(build_metro_tables(p2l, candidates.shape[0], ranks))
         for _ in range(30):
             active = torch.rand(48, generator=generator) < 0.3
-            base, _ = metro_repair_assign_reference(active, tables, moves=0)
-            full, _ = metro_repair_assign_reference(active, tables, moves=64)
-            early, _ = metro_repair_assign_reference(active, tables, moves=64, early_exit=True)
+            base, _ = metro_repair_assign_reference(active, tables.physical_by_rank, moves=0)
+            full, _ = metro_repair_assign_reference(active, tables.physical_by_rank, moves=64)
+            early, _ = metro_repair_assign_reference(
+                active, tables.physical_by_rank, moves=64, early_exit=True
+            )
             assert _peak(full) <= _peak(base)
             assert _peak(early) == _peak(full)
             assert int(full.sum()) == int(active.sum())
@@ -191,17 +202,17 @@ def test_repair_never_raises_the_peak_and_early_exit_keeps_it():
 def test_rank_invariant_candidates_ignore_per_rank_pruning():
     # SGLang with an a2a backend keeps only the local copy where one exists.
     pruned_rank2 = [[6, -1], [7, -1], [1, 4], [2, -1], [5, -1], [8, -1]]
-    full = rank_invariant_candidates(_placement())
-    pruned = rank_invariant_candidates(_placement(candidates=pruned_rank2))
-
-    assert torch.equal(full, pruned)
-    assert full.tolist() == _CANDIDATES
+    full = MetroRepairL2Router(num_gpus=3)._build_state(_placement()).tables
+    pruned = (
+        MetroRepairL2Router(num_gpus=3)._build_state(_placement(candidates=pruned_rank2)).tables
+    )
+    assert all(torch.equal(a, b) for a, b in zip(full.tensors(), pruned.tensors()))
 
 
 @pytest.mark.unit
 def test_inconsistent_candidates_are_rejected():
     with pytest.raises(ValueError):
-        rank_invariant_candidates(
+        MetroRepairL2Router(num_gpus=3).prepare_layer(
             _placement(candidates=[[1, 6], [3, 7], [1, 4], [2, -1], [5, -1], [8, -1]])
         )
 
@@ -324,7 +335,7 @@ def test_pipeline_declarations():
     assert capabilities.consumes_global_logical_count
     assert capabilities.requires_rank_dispatch_map
     assert capabilities.requires_deepep
-    assert capabilities.supports_concurrent_microbatches
+    assert not capabilities.supports_concurrent_microbatches
     assert not capabilities.dispatch_fixed_by_placement
     assert capabilities.graph_stability == "stable"
     with pytest.raises(ValueError):
@@ -335,9 +346,11 @@ def test_pipeline_declarations():
 
 
 def _want(ids, counts, tables, moves, early_exit, gate=None):
-    _, owner = metro_repair_assign_reference(counts > 0, tables, moves=moves, early_exit=early_exit)
+    _, owner = metro_repair_assign_reference(
+        counts > 0, tables.physical_by_rank, moves=moves, early_exit=early_exit
+    )
     metro = tables.metro
-    by_rank = metro.physical_by_rank.cpu().long()
+    by_rank = tables.physical_by_rank.cpu().long()
     logical = torch.arange(metro.num_logical)
     owner = owner.long()
     chosen = torch.where(
@@ -357,8 +370,8 @@ def _want(ids, counts, tables, moves, early_exit, gate=None):
 def test_cuda_kernel_matches_reference(ranks, num_logical):
     generator = torch.Generator().manual_seed(ranks * 1000 + num_logical)
     p2l, candidates = _random_placement(num_logical, ranks, max(ranks, num_logical // 2), generator)
-    tables = build_metro_repair_tables(build_metro_tables(candidates.cuda(), p2l.numel(), ranks))
-    host_tables = build_metro_repair_tables(build_metro_tables(candidates, p2l.numel(), ranks))
+    tables = build_metro_repair_tables(build_metro_tables(p2l.cuda(), candidates.shape[0], ranks))
+    host_tables = build_metro_repair_tables(build_metro_tables(p2l, candidates.shape[0], ranks))
     for num_tokens in (0, 1, 3, 8, 32, 128):
         skew = torch.rand(num_logical, generator=generator) ** 4 + 1e-3
         ids = torch.multinomial(
@@ -371,7 +384,7 @@ def test_cuda_kernel_matches_reference(ranks, num_logical):
         for moves, early_exit in ((0, False), (32, False), (32, True)):
             want = _want(ids, counts, host_tables, moves, early_exit)
             want_load, _ = metro_repair_assign_reference(
-                counts > 0, host_tables, moves=moves, early_exit=early_exit
+                counts > 0, host_tables.physical_by_rank, moves=moves, early_exit=early_exit
             )
             for in_dtype, out_dtype in (
                 (torch.int32, torch.int64),
@@ -381,7 +394,7 @@ def test_cuda_kernel_matches_reference(ranks, num_logical):
                 load = torch.empty(ranks, dtype=torch.int32, device="cuda")
                 got = metro_repair_route(
                     ids.to(in_dtype).cuda(),
-                    tables,
+                    **tables.operands(),
                     counts=counts.cuda(),
                     moves=moves,
                     early_exit=early_exit,
@@ -392,12 +405,14 @@ def test_cuda_kernel_matches_reference(ranks, num_logical):
                 assert torch.equal(got.cpu().long(), want)
                 assert torch.equal(load.cpu(), want_load)
             # EP-global TopK path: the active set comes from the ids themselves.
-            got = metro_repair_route(ids.cuda(), tables, moves=moves, early_exit=early_exit)
+            got = metro_repair_route(
+                ids.cuda(), **tables.operands(), moves=moves, early_exit=early_exit
+            )
             assert torch.equal(got.cpu(), want)
         if num_tokens > 1:
             gate = torch.tensor([num_tokens // 2], dtype=torch.int32, device="cuda")
             got = metro_repair_route(
-                ids.cuda(), tables, counts=counts.cuda(), num_token_non_padded=gate
+                ids.cuda(), **tables.operands(), counts=counts.cuda(), num_token_non_padded=gate
             )
             assert torch.equal(
                 got.cpu(), _want(ids, counts, host_tables, 32, True, num_tokens // 2)
@@ -410,14 +425,14 @@ def test_cuda_kernel_matches_reference(ranks, num_logical):
 def test_cuda_zero_moves_is_bitwise_metro(redundant):
     generator = torch.Generator().manual_seed(redundant)
     p2l, candidates = _random_placement(256, 8, redundant, generator)
-    metro = build_metro_tables(candidates.cuda(), p2l.numel(), 8)
+    metro = build_metro_tables(p2l.cuda(), 256, 8)
     tables = build_metro_repair_tables(metro)
     for num_tokens in (1, 4, 64, 300):
         ids = torch.randint(-1, 256, (num_tokens, 8), generator=generator, dtype=torch.int32).cuda()
         counts = torch.bincount(ids[ids >= 0].long(), minlength=256).float()
         assert torch.equal(
-            metro_repair_route(ids, tables, counts=counts, moves=0),
-            metro_route(ids, counts, metro),
+            metro_repair_route(ids, **tables.operands(), counts=counts, moves=0),
+            metro_route(ids, counts, **metro.operands()),
         )
 
 
@@ -460,5 +475,65 @@ def test_cuda_graph_replays_an_updated_placement():
 
     router.prepare_layer(placement(second_p2l, second))
     graph.replay()
-    tables = build_metro_repair_tables(build_metro_tables(second, second_p2l.numel(), 8))
+    tables = build_metro_repair_tables(build_metro_tables(second_p2l, 256, 8))
     assert torch.equal(out.cpu(), _want(ids, counts.cpu(), tables, 32, True))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("ranks,num_logical", [(33, 66), (64, 128), (128, 256), (8, 512)])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_unsupported_geometry_falls_back_to_current_metro(ranks, num_logical, device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("requires a CUDA device")
+    generator = torch.Generator().manual_seed(ranks)
+    p2l, candidates = _random_placement(num_logical, ranks, ranks, generator)
+    placement = _placement(p2l.tolist(), candidates.tolist(), ranks=ranks, device=device)
+    router = MetroRepairL2Router(num_gpus=ranks)
+    router.prepare_layer(placement)
+    ids = torch.arange(num_logical, dtype=torch.int32, device=device).view(-1, 2)
+    counts = torch.ones(num_logical, device=device)
+    request = RoutingRequest(
+        layer_id=0,
+        logical_topk_ids=ids,
+        topk_weights=torch.ones_like(ids),
+        placement=placement,
+        stage=RoutingStage.DECODE,
+        policies=("metro_repair",),
+        global_logical_count=counts,
+    )
+    decision = router.route_tokens(request)
+    tables = router._layer_state[0].tables.metro
+    want = metro_route(ids, counts, **tables.operands())
+    assert torch.equal(decision.routed_physical_topk_ids, want)
+    assert decision.metadata["repair_moves"] == 0
+    if device == "cuda":
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            out = router.route_tokens(request).routed_physical_topk_ids
+        counts[::2] = 0
+        graph.replay()
+        want = metro_route(ids, counts, **tables.operands())
+        assert torch.equal(out, want)
+
+
+@pytest.mark.unit
+def test_out_of_range_candidates_rejected_even_if_clamping_would_match():
+    bad = [row[:] for row in _CANDIDATES]
+    bad[5] = [len(_P2L) + 10, -1]
+    with pytest.raises(ValueError, match="disagrees"):
+        MetroRepairL2Router(num_gpus=3).prepare_layer(_placement(candidates=bad))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("stage", [RoutingStage.IDLE, RoutingStage.DECODE])
+def test_empty_rank_still_joins_collective(stage):
+    balancer, collectives = _balancer([1.0, 1.0, 1.0, 0.0, 0.0, 0.0])
+    balancer.on_placement_committed(_placement())
+    request = replace(
+        _request([[0, 1]], stage=stage),
+        logical_topk_ids=torch.empty((0, 2), dtype=torch.int32),
+        topk_weights=torch.empty((0, 2)),
+    )
+    decision = balancer.route_tokens(request)
+    assert len(collectives.payloads) == 1
+    assert decision.routed_physical_topk_ids.shape == (0, 2)
