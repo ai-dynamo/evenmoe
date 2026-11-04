@@ -45,7 +45,6 @@ from evenmoe.core.types import (
 from evenmoe.kernels.ops.metro import (
     MAX_RANKS,
     metro_mask_words,
-    metro_repair_assign_reference,
     metro_repair_route,
     metro_route,
     metro_workspace,
@@ -75,6 +74,9 @@ class MetroTables:
     rep_mask: Tensor
     rep_phys: Tensor
     num_replicated: Tensor
+    # Empty for geometries handled by the greedy kernel only.
+    physical_by_rank: Tensor
+    holder_mask: Tensor
 
     def operands(self) -> dict[str, Tensor]:
         """The keyword tables :func:`metro_route` takes."""
@@ -88,8 +90,15 @@ class MetroTables:
             "num_replicated": self.num_replicated,
         }
 
+    def repair_operands(self) -> dict[str, Tensor]:
+        return {
+            "holder_mask": self.holder_mask,
+            "physical_by_rank": self.physical_by_rank,
+            "default_physical": self.default_physical,
+        }
+
     def tensors(self) -> tuple[Tensor, ...]:
-        return tuple(self.operands().values())
+        return (*self.operands().values(), self.physical_by_rank, self.holder_mask)
 
 
 def metro_capacity(num_logical: int, num_physical: int) -> int:
@@ -155,6 +164,7 @@ def build_metro_tables(
     rep_logical[:count] = replicated.to(torch.int32)
     rep_mask[:count] = rank_mask[replicated]
     rep_phys[:count] = physical_by_rank[replicated].to(torch.int32)
+    repair = supports_repair(num_logical, num_ranks)
     return MetroTables(
         num_logical=num_logical,
         num_ranks=num_ranks,
@@ -165,43 +175,11 @@ def build_metro_tables(
         rep_mask=rep_mask,
         rep_phys=rep_phys,
         num_replicated=torch.tensor([count], dtype=torch.int32, device=device),
+        physical_by_rank=(
+            physical_by_rank.to(torch.int32) if repair else rep_phys.new_empty((0, 0))
+        ),
+        holder_mask=rank_mask[:, 0].contiguous() if repair else rep_mask.new_empty(0),
     )
-
-
-@dataclass(frozen=True)
-class MetroRepairTables:
-    """Additional tables for METRO's bounded repair kernel."""
-
-    metro: MetroTables
-    physical_by_rank: Tensor
-    holder_mask: Tensor
-
-    def operands(self) -> dict[str, Tensor]:
-        return {
-            "holder_mask": self.holder_mask,
-            "physical_by_rank": self.physical_by_rank,
-            "default_physical": self.metro.default_physical,
-        }
-
-
-def build_metro_repair_tables(metro: MetroTables) -> MetroRepairTables:
-    """Recover dense copies from the shared tables without rebuilding placement."""
-
-    device = metro.default_physical.device
-    physical = torch.full(
-        (metro.num_logical, metro.num_ranks), -1, dtype=torch.int32, device=device
-    )
-    single = metro.single_rank >= 0
-    logical = torch.arange(metro.num_logical, device=device)[single]
-    physical[logical, metro.single_rank[single].long()] = metro.default_physical[single]
-    count = int(metro.num_replicated.item())
-    physical[metro.rep_logical[:count].long()] = metro.rep_phys[:count]
-    mask = torch.zeros(metro.num_logical, dtype=torch.int32, device=device)
-    if metro.num_ranks <= 32:
-        bits = 1 << torch.arange(metro.num_ranks, dtype=torch.int64, device=device)
-        words = ((physical >= 0).to(torch.int64) * bits).sum(dim=1)
-        mask = torch.where(words >= 2**31, words - 2**32, words).to(torch.int32)
-    return MetroRepairTables(metro, physical, mask.contiguous())
 
 
 @dataclass
@@ -209,13 +187,6 @@ class _MetroLayerState:
     tables: MetroTables
     workspace: Tensor
     has_redundancy: bool
-    repair_tables: MetroRepairTables | None
-
-    def tensors(self) -> tuple[Tensor, ...]:
-        tensors = self.tables.tensors()
-        if self.repair_tables is not None:
-            tensors += (self.repair_tables.physical_by_rank, self.repair_tables.holder_mask)
-        return tensors
 
 
 class MetroL2Router(TokenRouter):
@@ -260,8 +231,8 @@ class MetroL2Router(TokenRouter):
 
         state = self._build_state(snapshot)
         current = self._layer_state.get(snapshot.layer_id)
-        if current is not None and _same_layout(current, state):
-            for dst, src in zip(current.tensors(), state.tensors()):
+        if current is not None and _same_layout(current.tables, state.tables):
+            for dst, src in zip(current.tables.tensors(), state.tables.tensors()):
                 dst.copy_(src)
             current.has_redundancy = state.has_redundancy
             return
@@ -331,7 +302,7 @@ class MetroL2Router(TokenRouter):
         early_exit = bool(policy.metadata.get("early_exit", self.early_exit))
         token_count = request.token_count
         gate = token_count if isinstance(token_count, Tensor) else None
-        if moves == 0 or state.repair_tables is None:
+        if moves == 0 or state.tables.physical_by_rank.numel() == 0:
             physical = metro_route(
                 topk_ids,
                 counts,
@@ -341,14 +312,10 @@ class MetroL2Router(TokenRouter):
                 out_dtype=out_dtype,
             )
             moves = 0
-        elif not topk_ids.is_cuda:
-            physical = _route_repair_host(
-                topk_ids, counts, state.repair_tables, gate, moves, early_exit
-            ).to(out_dtype)
         else:
             physical = metro_repair_route(
                 topk_ids,
-                **state.repair_tables.operands(),
+                **state.tables.repair_operands(),
                 counts=counts,
                 num_token_non_padded=gate,
                 moves=moves,
@@ -389,38 +356,7 @@ class MetroL2Router(TokenRouter):
                 tables.num_logical, tables.num_ranks, tables.capacity, p2l.device
             ),
             has_redundancy=int(tables.num_replicated.item()) > 0,
-            repair_tables=(
-                build_metro_repair_tables(tables)
-                if supports_repair(tables.num_logical, tables.num_ranks)
-                else None
-            ),
         )
-
-
-def _route_repair_host(
-    ids: Tensor,
-    counts: Tensor,
-    tables: MetroRepairTables,
-    gate: Tensor | None,
-    moves: int,
-    early_exit: bool,
-) -> Tensor:
-    metro = tables.metro
-    _, owner = metro_repair_assign_reference(
-        counts.detach().cpu() > 0, tables.physical_by_rank, moves=moves, early_exit=early_exit
-    )
-    by_rank = tables.physical_by_rank.cpu().long()
-    default = metro.default_physical.cpu().long()
-    logical = torch.arange(metro.num_logical)
-    owner = owner.long()
-    chosen = torch.where(owner >= 0, by_rank[logical, owner.clamp(min=0)], default)
-    host_ids = ids.detach().cpu().long()
-    valid = (host_ids >= 0) & (host_ids < metro.num_logical)
-    if gate is not None and host_ids.dim() > 1:
-        rows = torch.arange(host_ids.shape[0]).view(-1, *([1] * (host_ids.dim() - 1)))
-        valid &= rows < int(gate.reshape(-1)[0])
-    physical = torch.where(valid, chosen[host_ids.clamp(0, metro.num_logical - 1)], -1)
-    return physical.to(ids.device)
 
 
 def _check_candidates(snapshot: PlacementSnapshot, p2l: Tensor) -> None:
@@ -452,8 +388,8 @@ def _check_candidates(snapshot: PlacementSnapshot, p2l: Tensor) -> None:
         )
 
 
-def _same_layout(left: _MetroLayerState, right: _MetroLayerState) -> bool:
-    return len(left.tensors()) == len(right.tensors()) and all(
+def _same_layout(left: MetroTables, right: MetroTables) -> bool:
+    return all(
         a.shape == b.shape and a.dtype == b.dtype and a.device == b.device
         for a, b in zip(left.tensors(), right.tensors())
     )

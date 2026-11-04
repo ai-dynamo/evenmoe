@@ -404,12 +404,11 @@ def metro_repair_route(
     one-element tensor; rows at or past it, and ids outside ``[0, L)``, come
     back as -1. ``rank_load`` (``[G]`` int32), if given, receives each rank's
     number of distinct active experts after routing. One launch on the current
-    stream; no host synchronization, so it is CUDA-graph safe.
+    stream; no host synchronization, so it is CUDA-graph safe. CPU routing
+    uses the reference assignment and requires explicit global ``counts``.
     """
 
     num_logical, num_ranks = physical_by_rank.shape
-    if not logical_topk_ids.is_cuda:
-        raise ValueError("metro_repair_route runs on CUDA tensors; use the reference on CPU.")
     if not supports_repair(num_logical, num_ranks):
         raise ValueError(
             f"METRO bounded repair supports <= {_REPAIR_MAX_LOGICAL} experts and <= {_REPAIR_MAX_RANKS} ranks; "
@@ -436,6 +435,18 @@ def metro_repair_route(
     else:
         gate = num_token_non_padded.reshape(-1)[:1]
         gate = gate if gate.dtype == torch.int32 else gate.to(torch.int32)
+    if not ids.is_cuda:
+        if counts is None:
+            raise ValueError("CPU METRO repair routing requires global counts.")
+        load, owner = metro_repair_assign_reference(
+            counts_arg > 0, physical_by_rank, moves=moves, early_exit=early_exit
+        )
+        chosen = default_physical.cpu().long().clone()
+        active = owner >= 0
+        chosen[active] = physical_by_rank.cpu()[active, owner[active].long()].long()
+        if rank_load is not None:
+            rank_load.copy_(load)
+        return _route_host(logical_topk_ids, chosen, num_token_non_padded, out_dtype)
     if rank_load is None:
         rank_load = torch.empty(num_ranks, dtype=torch.int32, device=device)
     out = torch.empty(ids.shape, dtype=out_dtype, device=device)

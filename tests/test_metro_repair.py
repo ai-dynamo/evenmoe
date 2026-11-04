@@ -22,7 +22,6 @@ from evenmoe.kernels.ops.metro import (
 )
 from evenmoe.policies.l2.metro import (
     MetroL2Router,
-    build_metro_repair_tables,
     build_metro_tables,
 )
 
@@ -87,7 +86,7 @@ def _balancer(peer_contribution, algorithm="metro"):
 
 
 def _tables(p2l=_P2L, candidates=_CANDIDATES, ranks=3):
-    return build_metro_repair_tables(build_metro_tables(torch.tensor(p2l), len(candidates), ranks))
+    return build_metro_tables(torch.tensor(p2l), len(candidates), ranks)
 
 
 def _random_placement(num_logical, num_ranks, redundant, generator):
@@ -125,22 +124,41 @@ def test_holder_mask():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("out_dtype", [torch.int32, torch.int64])
+def test_cpu_route_preserves_padding_invalid_ids_and_inactive_defaults(out_dtype):
+    tables = _tables()
+    ids = torch.tensor([[0, 1, 2, 5, -1, 6], [0, 1, 2, 3, 4, 5]], dtype=torch.int64)
+    counts = torch.tensor([1, 1, 1, 0, 0, 0], dtype=torch.float32)
+    load = torch.empty(3, dtype=torch.int32)
+    got = metro_repair_route(
+        ids,
+        **tables.repair_operands(),
+        counts=counts,
+        num_token_non_padded=torch.tensor(1),
+        out_dtype=out_dtype,
+        rank_load=load,
+    )
+    assert got.dtype == out_dtype
+    assert got.tolist() == [[6, 3, 1, 8, -1, -1], [-1, -1, -1, -1, -1, -1]]
+    assert load.tolist() == [1, 1, 1]
+
+
+@pytest.mark.unit
 def test_zero_moves_is_metro():
     generator = torch.Generator().manual_seed(1)
     for ranks in (2, 3, 8, 16):
         p2l, candidates = _random_placement(64, ranks, 3 * ranks, generator)
-        metro = build_metro_tables(p2l, candidates.shape[0], ranks)
-        tables = build_metro_repair_tables(metro)
+        tables = build_metro_tables(p2l, candidates.shape[0], ranks)
         for _ in range(20):
             active = torch.rand(64, generator=generator) < torch.rand(1, generator=generator)
             _, owner = metro_repair_assign_reference(active, tables.physical_by_rank, moves=0)
             chosen = metro_assign_reference(
                 active.float(),
-                metro.default_physical,
-                metro.single_rank,
-                metro.rep_logical,
-                metro.rep_phys,
-                metro.num_replicated,
+                tables.default_physical,
+                tables.single_rank,
+                tables.rep_logical,
+                tables.rep_phys,
+                tables.num_replicated,
             )
             live = torch.nonzero(active).flatten()
             got = tables.physical_by_rank[live, owner[live].long()]
@@ -187,7 +205,7 @@ def test_repair_never_raises_the_peak_and_early_exit_keeps_it():
     generator = torch.Generator().manual_seed(2)
     for ranks in (2, 4, 8):
         p2l, candidates = _random_placement(48, ranks, 2 * ranks, generator)
-        tables = build_metro_repair_tables(build_metro_tables(p2l, candidates.shape[0], ranks))
+        tables = build_metro_tables(p2l, candidates.shape[0], ranks)
         for _ in range(30):
             active = torch.rand(48, generator=generator) < 0.3
             base, _ = metro_repair_assign_reference(active, tables.physical_by_rank, moves=0)
@@ -207,8 +225,8 @@ def test_repair_never_raises_the_peak_and_early_exit_keeps_it():
 def test_rank_invariant_candidates_ignore_per_rank_pruning():
     # SGLang with an a2a backend keeps only the local copy where one exists.
     pruned_rank2 = [[6, -1], [7, -1], [1, 4], [2, -1], [5, -1], [8, -1]]
-    full = MetroL2Router(num_gpus=3)._build_state(_placement())
-    pruned = MetroL2Router(num_gpus=3)._build_state(_placement(candidates=pruned_rank2))
+    full = MetroL2Router(num_gpus=3)._build_state(_placement()).tables
+    pruned = MetroL2Router(num_gpus=3)._build_state(_placement(candidates=pruned_rank2)).tables
     assert all(torch.equal(a, b) for a, b in zip(full.tensors(), pruned.tensors()))
 
 
@@ -230,7 +248,7 @@ def test_routers_on_every_rank_build_the_same_tables():
             pruned.append((mine[:1] + [-1]) if mine else copies)
         router = MetroL2Router(num_gpus=3)
         router.prepare_layer(_placement(candidates=pruned))
-        tables.append(router._layer_state[0])
+        tables.append(router._layer_state[0].tables)
     for other in tables[1:]:
         assert all(torch.equal(a, b) for a, b in zip(tables[0].tensors(), other.tensors()))
 
@@ -352,18 +370,17 @@ def _want(ids, counts, tables, moves, early_exit, gate=None):
     _, owner = metro_repair_assign_reference(
         counts > 0, tables.physical_by_rank, moves=moves, early_exit=early_exit
     )
-    metro = tables.metro
     by_rank = tables.physical_by_rank.cpu().long()
-    logical = torch.arange(metro.num_logical)
+    logical = torch.arange(tables.num_logical)
     owner = owner.long()
     chosen = torch.where(
-        owner >= 0, by_rank[logical, owner.clamp(min=0)], metro.default_physical.cpu().long()
+        owner >= 0, by_rank[logical, owner.clamp(min=0)], tables.default_physical.cpu().long()
     )
     ids = ids.cpu().long()
-    valid = (ids >= 0) & (ids < metro.num_logical)
+    valid = (ids >= 0) & (ids < tables.num_logical)
     if gate is not None:
         valid &= torch.arange(ids.shape[0]).view(-1, 1) < gate
-    return torch.where(valid, chosen[ids.clamp(0, metro.num_logical - 1)], -1)
+    return torch.where(valid, chosen[ids.clamp(0, tables.num_logical - 1)], -1)
 
 
 @pytest.mark.integration
@@ -373,8 +390,8 @@ def _want(ids, counts, tables, moves, early_exit, gate=None):
 def test_cuda_kernel_matches_reference(ranks, num_logical):
     generator = torch.Generator().manual_seed(ranks * 1000 + num_logical)
     p2l, candidates = _random_placement(num_logical, ranks, max(ranks, num_logical // 2), generator)
-    tables = build_metro_repair_tables(build_metro_tables(p2l.cuda(), candidates.shape[0], ranks))
-    host_tables = build_metro_repair_tables(build_metro_tables(p2l, candidates.shape[0], ranks))
+    tables = build_metro_tables(p2l.cuda(), candidates.shape[0], ranks)
+    host_tables = build_metro_tables(p2l, candidates.shape[0], ranks)
     for num_tokens in (0, 1, 3, 8, 32, 128):
         skew = torch.rand(num_logical, generator=generator) ** 4 + 1e-3
         ids = torch.multinomial(
@@ -397,7 +414,7 @@ def test_cuda_kernel_matches_reference(ranks, num_logical):
                 load = torch.empty(ranks, dtype=torch.int32, device="cuda")
                 got = metro_repair_route(
                     ids.to(in_dtype).cuda(),
-                    **tables.operands(),
+                    **tables.repair_operands(),
                     counts=counts.cuda(),
                     moves=moves,
                     early_exit=early_exit,
@@ -409,13 +426,16 @@ def test_cuda_kernel_matches_reference(ranks, num_logical):
                 assert torch.equal(load.cpu(), want_load)
             # EP-global TopK path: the active set comes from the ids themselves.
             got = metro_repair_route(
-                ids.cuda(), **tables.operands(), moves=moves, early_exit=early_exit
+                ids.cuda(), **tables.repair_operands(), moves=moves, early_exit=early_exit
             )
             assert torch.equal(got.cpu(), want)
         if num_tokens > 1:
             gate = torch.tensor([num_tokens // 2], dtype=torch.int32, device="cuda")
             got = metro_repair_route(
-                ids.cuda(), **tables.operands(), counts=counts.cuda(), num_token_non_padded=gate
+                ids.cuda(),
+                **tables.repair_operands(),
+                counts=counts.cuda(),
+                num_token_non_padded=gate,
             )
             assert torch.equal(
                 got.cpu(), _want(ids, counts, host_tables, 32, True, num_tokens // 2)
@@ -428,14 +448,13 @@ def test_cuda_kernel_matches_reference(ranks, num_logical):
 def test_cuda_zero_moves_is_bitwise_metro(redundant):
     generator = torch.Generator().manual_seed(redundant)
     p2l, _ = _random_placement(256, 8, redundant, generator)
-    metro = build_metro_tables(p2l.cuda(), 256, 8)
-    tables = build_metro_repair_tables(metro)
+    tables = build_metro_tables(p2l.cuda(), 256, 8)
     for num_tokens in (1, 4, 64, 300):
         ids = torch.randint(-1, 256, (num_tokens, 8), generator=generator, dtype=torch.int32).cuda()
         counts = torch.bincount(ids[ids >= 0].long(), minlength=256).float()
         assert torch.equal(
-            metro_repair_route(ids, **tables.operands(), counts=counts, moves=0),
-            metro_route(ids, counts, **metro.operands()),
+            metro_repair_route(ids, **tables.repair_operands(), counts=counts, moves=0),
+            metro_route(ids, counts, **tables.operands()),
         )
 
 
@@ -478,7 +497,7 @@ def test_cuda_graph_replays_an_updated_placement():
 
     router.prepare_layer(placement(second_p2l, second))
     graph.replay()
-    tables = build_metro_repair_tables(build_metro_tables(second_p2l, 256, 8))
+    tables = build_metro_tables(second_p2l, 256, 8)
     assert torch.equal(out.cpu(), _want(ids, counts.cpu(), tables, 32, True))
 
 
