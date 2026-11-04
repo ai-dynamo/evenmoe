@@ -42,6 +42,7 @@ Support below refers to EvenMoE's `main`-branch adapters; serving requires the c
 |:---|:---|:---:|:---:|
 | **L1 · Expert placement** | EPLB | ✅ | ✅ |
 | | UltraEP | ✅ | ✅ |
+| | Tile-aware placement (`tile`) | ✅ | 🚧 |
 | **L2 · Token routing** | Static (deterministic replica rule) | ✅ | ✅ |
 | | LPLB | ✅ | ✅ |
 | | METRO | ✅ | ✅¹ |
@@ -49,6 +50,7 @@ Support below refers to EvenMoE's `main`-branch adapters; serving requires the c
 | | UltraEP | ✅ | ✅ |
 | | LPLB + Waterfill | ✅ | ✅ |
 | | UltraEP + Waterfill | ✅ | ✅ |
+| | Tile repair (`tile_repair`, decode) | ✅ | 🚧 |
 
 Compose L2 policies with `+`, for example `lplb+waterfill` or `ultraep+waterfill`, subject to the framework support above.
 
@@ -155,6 +157,32 @@ Keep the launch flags and change the two selectors to switch algorithms:
 | METRO on a fixed placement (drop `--enable-eplb`) | *(omit)* | `metro` |
 
 LPLB requires redundant replicas (`--ep-num-redundant-experts > 0`) and a recorded placement passed via `--init-expert-location` (produced once with `--enable-eplb`). [METRO](https://arxiv.org/abs/2512.09277) assigns each decode step's active replicated experts to ranks so every rank reads as few distinct expert weights as possible, and routes prefill and mixed steps with the static replica rule. It has been validated only on a fixed placement: keep `--ep-num-redundant-experts` and `--init-expert-location`, drop `--enable-eplb`, select `metro`, and retain DeepEP. Waterfill requires a shared-expert model. To run Waterfill without periodic EPLB, drop `--enable-eplb`/`--eplb-algorithm`, select `waterfill`, and retain DeepEP.
+
+#### Tile-aware placement and routing (decode)
+
+Decode GEMMs execute whole tiles even when an expert receives only a few tokens.
+`tile` places experts by their expected tile load and adds redundant copies.
+`tile_repair` starts from each expert's primary copy and shifts tokens to replicas
+when doing so reduces the busiest rank's tile load. Each layer gathers per-rank
+counts through the framework's all-reduce, then plans and routes in one CUDA kernel.
+
+Select `--eplb-algorithm tile` (or a recorded tile placement) together with
+`--moe-load-balancer-algorithm tile_repair` and redundant experts, e.g.
+`--ep-num-redundant-experts 32` at EP8. Placement and routing must use the same
+GEMM tile height; DeepGEMM on H20 uses 64.
+
+| Environment variable | Default | Purpose |
+|:---|:---|:---|
+| `EVENMOE_TILE_BLOCK_M` | `64` | GEMM tile height; `0` selects adaptive sizing |
+| `EVENMOE_TILE_MAX_MOVES` | `32` | Maximum repair moves per layer |
+| `EVENMOE_TILE_REPAIR_STAGES` | `decode,idle,speculative` | Stages that repair; others route primary-only |
+| `EVENMOE_TILE_TOKENS_PER_PASS` | `128 × ep_size` | Expected routed token/expert pairs for placement |
+
+Policy metadata overrides these defaults. Every supported layer with extra slots
+joins the count collective, including empty batches and primary-only stages.
+CUDA supports up to 512 logical experts, 32 ranks and four distinct-rank copies
+per expert; larger geometries route primary-only. vLLM's precomputed 1-D counts
+need adapter changes to supply the required per-rank counts.
 
 ### vLLM
 

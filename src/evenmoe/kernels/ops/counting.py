@@ -15,11 +15,15 @@ def count_logical_experts(
     logical_topk_ids: object,
     num_logical_experts: int,
     dtype: Any = None,
+    out: Tensor | None = None,
 ) -> Tensor:
     """Count valid logical TopK slots without counting ``-1`` padding.
 
     Counts accumulate in float32 on both backends; ``dtype`` only casts the
     result. The Triton backend uses floating-point atomic increments.
+    ``out``, if given, is a zero-initialised contiguous float32
+    ``[num_logical_experts]`` buffer (for example one row of a collective
+    payload) that receives the counts in place.
     """
 
     if num_logical_experts <= 0:
@@ -27,11 +31,23 @@ def count_logical_experts(
     if not isinstance(logical_topk_ids, Tensor):
         raise TypeError("Logical expert counting requires a torch.Tensor.")
 
-    counts = torch.zeros(
-        num_logical_experts,
-        dtype=torch.float32,
-        device=logical_topk_ids.device,
-    )
+    if out is None:
+        counts = torch.zeros(
+            num_logical_experts,
+            dtype=torch.float32,
+            device=logical_topk_ids.device,
+        )
+    else:
+        if (
+            out.shape != (num_logical_experts,)
+            or out.dtype != torch.float32
+            or not out.is_contiguous()
+            or out.device != logical_topk_ids.device
+        ):
+            raise ValueError(
+                "out must be a contiguous float32 [num_logical_experts] tensor on the ids' device."
+            )
+        counts = out
     if logical_topk_ids.is_cuda:
         from evenmoe.kernels.ops._logical_count_triton import (
             count_logical_experts_cuda,

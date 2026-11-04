@@ -222,7 +222,10 @@ def _merge_capabilities(steps: Sequence[_RoutingStep]) -> RoutingCapabilities:
         # stays a deterministic, placement-fixed dispatch.
         dispatch_fixed_by_placement=bool(steps)
         and all(spec.dispatch_fixed_by_placement for spec in specs),
-        consumes_global_logical_count=any(spec.logical_count == "global" for spec in specs),
+        consumes_global_logical_count=any(
+            spec.logical_count in ("global", "per_rank") for spec in specs
+        ),
+        consumes_per_rank_logical_count=any(spec.logical_count == "per_rank" for spec in specs),
         supports_concurrent_microbatches=all(
             spec.supports_concurrent_microbatches for spec in specs
         ),

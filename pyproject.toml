@@ -59,6 +59,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 "evenmoe.kernels.jit" = ["include/evenmoe_jit/*"]
 "evenmoe.kernels.lplb" = ["csrc/*.cuh"]
+"evenmoe.kernels.tile_repair" = ["csrc/*.cuh"]
 "evenmoe.kernels.ultraep" = [
     "LICENSE.ultraep",
     "csrc/*.cuh",
@@ -70,6 +71,7 @@ testpaths = ["tests"]
 markers = [
     "unit: framework-neutral core/contract tests",
     "integration: tests that touch adapter glue or external frameworks",
+    "multi_gpu: tests that launch several GPU processes (skipped below two devices)",
 ]
 
 [tool.ruff]
