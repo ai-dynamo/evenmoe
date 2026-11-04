@@ -424,7 +424,7 @@ def test_cuda_kernel_matches_reference(ranks, num_logical):
 @pytest.mark.parametrize("redundant", [8, 32, 64, 96])
 def test_cuda_zero_moves_is_bitwise_metro(redundant):
     generator = torch.Generator().manual_seed(redundant)
-    p2l, candidates = _random_placement(256, 8, redundant, generator)
+    p2l, _ = _random_placement(256, 8, redundant, generator)
     metro = build_metro_tables(p2l.cuda(), 256, 8)
     tables = build_metro_repair_tables(metro)
     for num_tokens in (1, 4, 64, 300):
