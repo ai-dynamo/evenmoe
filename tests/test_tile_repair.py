@@ -402,12 +402,14 @@ def test_pipeline_declarations():
     assert capabilities.consumes_global_logical_count
     assert capabilities.requires_placement_state
     assert capabilities.graph_stability == "stable"
+    assert not capabilities.supports_concurrent_microbatches
     assert not capabilities.dispatch_fixed_by_placement
     reason = pipeline.is_applicable(ExpertDeploymentConfig(num_redundant_experts=0))
     assert reason is not None and "redundant" in reason
     assert pipeline.is_applicable(ExpertDeploymentConfig(num_redundant_experts=32)) is None
     combined = RoutingPipeline.from_value("tile_repair+waterfill")
     assert combined.policies == ("tile_repair", "waterfill")
+    assert not combined.capabilities.supports_concurrent_microbatches
 
 
 def test_routers_on_every_rank_build_the_same_tables():
@@ -610,3 +612,78 @@ def test_cuda_graph_replays_an_updated_placement_and_batch():
         ids2[3], counts2, tables2, source_rank=3, block_m=64, max_moves=32
     )
     assert torch.equal(captured.cpu(), expected2)
+
+
+@cuda
+@pytest.mark.parametrize("start_with_remote_copies", [False, True])
+def test_cuda_graph_keeps_collective_when_copy_ranks_change(start_with_remote_copies):
+    local_copies = [0, 1, 0, 2, 3, 2]
+    remote_copies = [0, 1, 2, 2, 3, 0]
+    layouts = [local_copies, remote_copies]
+    if start_with_remote_copies:
+        layouts.reverse()
+    counts = torch.tensor([[128, 64, 0, 0], [0, 0, 0, 0]], dtype=torch.float32)
+    (mlb, collectives), _ = _ep_balancers(2, counts.cuda())
+    first = _snapshot(layouts[0], num_logical=4, ranks=2, device="cuda")
+    mlb.on_placement_committed(first)
+    ids = torch.tensor([0] * 128 + [1] * 64, device="cuda").reshape(-1, 1)
+    request = _routing_request(ids, first)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        mlb.route_tokens(request)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured = mlb.route_tokens(request).routed_physical_topk_ids
+    # Both layouts must capture the collective, including local-only copies.
+    assert len(collectives.payloads) == 2
+    for p2l in (layouts[1], layouts[0]):
+        placement = _snapshot(p2l, num_logical=4, ranks=2, device="cuda")
+        mlb.on_placement_committed(placement)
+        graph.replay()
+        torch.cuda.synchronize()
+        eager = mlb.route_tokens(_routing_request(ids, placement)).routed_physical_topk_ids
+        expected = tile_repair_route_reference(
+            ids.cpu(), counts, tables_from_snapshot(placement), source_rank=0,
+            block_m=64, max_moves=32,
+        )
+        assert torch.equal(captured.cpu(), expected)
+        assert torch.equal(eager.cpu(), expected)
+
+
+@cuda
+@pytest.mark.parametrize("logical,ranks,p2p", [(1024, 2, False), (1024, 2, True), (256, 64, False)])
+def test_unsupported_geometry_skips_exchange_and_replays_primary_mapping(logical, ranks, p2p):
+    from evenmoe.kernels.tile_repair.p2p import local_peer_exchanges
+
+    exchange = local_peer_exchanges(ranks)[0] if p2p else None
+    # No collectives: asking for a count is itself a regression on this path.
+    mlb = MoELoadBalancer.from_algorithm(
+        "tile_repair", ep_size=ranks, source_rank=0, experts_per_rank=logical // ranks + 1,
+        tile_p2p_exchange=exchange,
+    )
+    ids = torch.tensor([[0, logical - 1], [7, -1]], device="cuda")
+    first = _snapshot(
+        _random_p2l(logical, ranks, 1, seed=32), num_logical=logical, ranks=ranks, device="cuda"
+    )
+    mlb.on_placement_committed(first)
+    request = _routing_request(ids, first)
+    mlb.route_tokens(request)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = mlb.route_tokens(request).routed_physical_topk_ids
+    for placement in (first, _snapshot(
+        _random_p2l(logical, ranks, 1, seed=33), num_logical=logical, ranks=ranks, device="cuda"
+    )):
+        mlb.on_placement_committed(placement)
+        graph.replay()
+        torch.cuda.synchronize()
+        primary = tables_from_snapshot(placement).primary_physical.long()
+        expected = torch.where(ids >= 0, primary[ids.clamp(min=0)], -1)
+        decision = mlb.route_tokens(_routing_request(ids, placement))
+        assert not decision.metadata["tile_repair"]
+        assert torch.equal(decision.routed_physical_topk_ids, expected)
+        assert torch.equal(captured, expected)
+    if exchange is not None:
+        assert int(exchange.epoch.item()) == 0

@@ -15,9 +15,11 @@ output for the same counts).
 
 Requirements and guarantees:
 
-- Every rank must call it once per layer with replicated experts, in the same
+- Every rank must call it once per layer with extra slots, in the same
   order (the epoch is a per-process call counter shared by all layers). Ranks
   with no tokens call it with an empty ``[0, K]`` batch.
+- Calls using the same exchange must not overlap, including calls on different
+  CUDA streams or from different graphs: the epoch and inbox are shared.
 - The receive buffers live in torch symmetric memory on the EP process group
   (:func:`create_peer_exchange`, a one-time collective at model setup, never
   inside CUDA-graph capture). Multi-node groups or a missing symmetric-memory

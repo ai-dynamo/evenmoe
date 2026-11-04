@@ -13,10 +13,14 @@ above primary-only static routing.
 
 Contract:
 
-- The policy runs in every stage, and on every layer with a replicated expert
+- The policy runs in every stage, and on every supported layer with extra slots
   every EP rank joins one exchange of per-rank counts. Stages in ``stages``
   (default decode, idle, speculative; ``"all"`` for every stage) run the
   repair; the others route every token to its primary copy.
+  Even same-rank duplicates participate: a same-shape placement update may
+  move them to another rank, so captured graphs must retain the exchange.
+- Calls must be serialized across microbatches and layers. The optional P2P
+  transport shares one epoch and receive buffer across the router.
 - Exchange, default: the orchestrator all-reduces a ``[ep_size, num_logical]``
   payload in which each rank fills its own row
   (``RoutingPolicySpec.logical_count == "per_rank"``) through the framework's
@@ -91,8 +95,13 @@ logger = logging.getLogger(__name__)
 @dataclass
 class _LayerState:
     tables: TileRepairTables
-    has_redundancy: bool
     num_slots: int
+
+    @property
+    def has_extra_slots(self) -> bool:
+        # Unlike the current number of distinct-rank copies, capacity cannot
+        # change in a same-shape placement update.
+        return self.num_slots > self.tables.num_logical
 
 
 def tables_from_snapshot(snapshot: PlacementSnapshot) -> TileRepairTables:
@@ -207,13 +216,12 @@ class TileRepairL2Router(TokenRouter):
         if current is not None and _same_layout(current.tables, state.tables):
             for dst, src in zip(current.tables.tensors(), state.tables.tensors()):
                 dst.copy_(src)
-            current.has_redundancy = state.has_redundancy
             current.num_slots = state.num_slots
             return
         self._layer_state[snapshot.layer_id] = state
 
     def needs_global_logical_count(self, request: RoutingRequest) -> bool:
-        """Only a layer with a replicated expert has a choice to make.
+        """Keep exchange participation fixed across same-shape updates.
 
         Deliberately independent of the stage: every EP rank must join the
         collective, including ranks whose own stage routes primary-only. With
@@ -222,7 +230,11 @@ class TileRepairL2Router(TokenRouter):
 
         if request.placement is None:
             return False
-        if not self._state(request.layer_id, request.placement).has_redundancy:
+        state = self._state(request.layer_id, request.placement)
+        if not state.has_extra_slots or (
+            _is_cuda(request.logical_topk_ids)
+            and not supports(state.tables.num_logical, state.tables.num_ranks)
+        ):
             return False
         exchange = self._ensure_exchange()
         return exchange is None or not _is_cuda(request.logical_topk_ids)
@@ -248,20 +260,28 @@ class TileRepairL2Router(TokenRouter):
         out_dtype = self.out_dtype or topk_ids.dtype
         state = self._state(request.layer_id, placement)
         block_m, max_moves, stages = self._tunables(policy.metadata)
+        tables = state.tables
+        if topk_ids.is_cuda and not supports(tables.num_logical, tables.num_ranks):
+            if not self._warned_fallback:
+                logger.warning(
+                    "tile_repair covers <= 512 experts and <= 32 ranks; layer %d "
+                    "(%d experts, %d ranks) routes to primary copies.",
+                    request.layer_id,
+                    tables.num_logical,
+                    tables.num_ranks,
+                )
+                self._warned_fallback = True
+            return self._primary_only(request, state, policy, out_dtype)
+        if not state.has_extra_slots:
+            return self._primary_only(request, state, policy, out_dtype)
 
         repair = (
-            state.has_redundancy
-            and (request.stage is None or request.stage in stages)
+            (request.stage is None or request.stage in stages)
             and policy.should_run_for_stage(request.stage)
         )
         exchange = self.p2p_exchange
-        if (
-            exchange is not None
-            and state.has_redundancy
-            and topk_ids.is_cuda
-            and supports(state.tables.num_logical, state.tables.num_ranks)
-        ):
-            # Every rank exchanges on every layer with replicas, in every
+        if exchange is not None and topk_ids.is_cuda:
+            # Every rank exchanges on every layer with extra slots, in every
             # stage; a stage without repair plans zero moves (primary-only).
             physical = tile_repair_route_p2p(
                 topk_ids,
@@ -294,7 +314,6 @@ class TileRepairL2Router(TokenRouter):
             )
         if not isinstance(counts, Tensor):
             raise TypeError("TileRepairL2Router requires a torch.Tensor logical count.")
-        tables = state.tables
         expected = (tables.num_ranks, tables.num_logical)
         if tuple(counts.shape) != expected:
             raise ValueError(
@@ -313,7 +332,7 @@ class TileRepairL2Router(TokenRouter):
                 max_moves=max_moves,
                 num_slots=state.num_slots,
             ).to(out_dtype)
-        elif supports(tables.num_logical, tables.num_ranks):
+        else:
             physical = tile_repair_route(
                 topk_ids,
                 counts,
@@ -324,17 +343,6 @@ class TileRepairL2Router(TokenRouter):
                 out_dtype=out_dtype,
                 num_slots=state.num_slots,
             )
-        else:
-            if not self._warned_fallback:
-                logger.warning(
-                    "tile_repair covers <= 512 experts and <= 32 ranks; layer %d "
-                    "(%d experts, %d ranks) routes to primary copies.",
-                    request.layer_id,
-                    tables.num_logical,
-                    tables.num_ranks,
-                )
-                self._warned_fallback = True
-            return self._primary_only(request, state, policy, out_dtype)
         return RoutingDecision(
             routed_physical_topk_ids=physical,
             topk_weights=request.topk_weights,
@@ -389,7 +397,6 @@ class TileRepairL2Router(TokenRouter):
         tables = tables_from_snapshot(snapshot)
         return _LayerState(
             tables=tables,
-            has_redundancy=int(tables.num_replicated.cpu()[0]) > 0,
             num_slots=snapshot.num_physical_experts,
         )
 
@@ -435,5 +442,8 @@ ROUTING_POLICY = RoutingPolicySpec(
     requires_rank_dispatch_map=True,
     requires_deepep=True,
     requires_redundancy=True,
+    # P2P is selected through build options/environment, after capabilities
+    # are resolved. Conservatively require serialized calls for this policy.
+    supports_concurrent_microbatches=False,
     build_router=_build_router,
 )
