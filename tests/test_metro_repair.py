@@ -14,11 +14,12 @@ from evenmoe import (
     RoutingRequest,
     RoutingStage,
 )
-from evenmoe.kernels.metro_repair import (
+from evenmoe.kernels.ops.metro import (
+    metro_assign_reference,
     metro_repair_assign_reference,
     metro_repair_route,
+    metro_route,
 )
-from evenmoe.kernels.ops.metro import metro_assign_reference, metro_route
 from evenmoe.policies.l2.metro import (
     MetroL2Router,
     build_metro_repair_tables,

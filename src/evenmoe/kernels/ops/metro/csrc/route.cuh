@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// METRO-repair decode routing: one launch, one CTA.
+// METRO decode routing with bounded repair: one launch, one CTA.
 //
 //   1. Active set: ``count[l] > 0`` from the EP-summed count, or -- when no
 //      count is given -- every in-range id of the (already EP-global) TopK.
@@ -363,7 +363,7 @@ void metro_repair_route(tvm::ffi::TensorView logical_topk_ids,
   const int64_t tokens = num_tokens.unwrap();
   const int64_t k = top_k.unwrap();
   RuntimeCheck(logical > 0 && logical <= kMetroRepairMaxLogical,
-               "METRO-repair supports 1..", kMetroRepairMaxLogical, " logical experts, got ", logical);
+               "METRO bounded repair supports 1..", kMetroRepairMaxLogical, " logical experts, got ", logical);
   RuntimeCheck(ranks == RANKS, "num_ranks ", ranks, " does not match the module compiled for ", RANKS);
   RuntimeCheck(num_counts.unwrap() == 0 || num_counts.unwrap() == logical, "counts must be empty or [num_logical]");
   RuntimeCheck(num_gate.unwrap() <= 1, "token_gate must be empty or one element");

@@ -42,18 +42,14 @@ from evenmoe.core.types import (
     RoutingRequest,
     RoutingStage,
 )
-from evenmoe.kernels.metro_repair import (
-    metro_repair_assign_reference,
-    metro_repair_route,
-)
-from evenmoe.kernels.metro_repair import (
-    supports as supports_repair,
-)
 from evenmoe.kernels.ops.metro import (
     MAX_RANKS,
     metro_mask_words,
+    metro_repair_assign_reference,
+    metro_repair_route,
     metro_route,
     metro_workspace,
+    supports_repair,
 )
 from evenmoe.policies.l2.replica import route_static_replicas
 
