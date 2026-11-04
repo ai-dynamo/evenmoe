@@ -173,6 +173,7 @@ CASES = [
     ("static+waterfill", "static+waterfill", {}),
     ("dynamic+waterfill", "dynamic+waterfill", {}),
     ("lplb+waterfill", "lplb+waterfill", {}),
+    ("metro", "metro", {}),
     ("fake", "fake", {}),
     ("fake+static", "fake+static", {}),
     ("fake+lplb", "fake+lplb", {}),
