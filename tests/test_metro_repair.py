@@ -10,6 +10,7 @@ from evenmoe import (
     MoELoadBalancer,
     PlacementSnapshot,
     RoutingPipeline,
+    RoutingPolicyConfig,
     RoutingRequest,
     RoutingStage,
 )
@@ -18,8 +19,11 @@ from evenmoe.kernels.metro_repair import (
     metro_repair_route,
 )
 from evenmoe.kernels.ops.metro import metro_assign_reference, metro_route
-from evenmoe.policies.l2.metro import build_metro_tables
-from evenmoe.policies.l2.metro_repair import MetroRepairL2Router, build_metro_repair_tables
+from evenmoe.policies.l2.metro import (
+    MetroL2Router,
+    build_metro_repair_tables,
+    build_metro_tables,
+)
 
 # Six logical experts on three ranks of three slots: rank 0 holds 0, 2, 3; rank 1
 # holds 1, 2, 4; rank 2 holds 0, 1, 5. With 0, 1, 2 active METRO's greedy
@@ -73,7 +77,7 @@ def _request(ids, *, placement=None, stage=RoutingStage.DECODE, token_count=None
     )
 
 
-def _balancer(peer_contribution, algorithm="metro_repair"):
+def _balancer(peer_contribution, algorithm="metro"):
     collectives = _RecordingCollectives(torch.tensor(peer_contribution, dtype=torch.float32))
     balancer = MoELoadBalancer.from_algorithm(
         algorithm, ep_size=3, source_rank=0, experts_per_rank=3, collectives=collectives
@@ -202,17 +206,15 @@ def test_repair_never_raises_the_peak_and_early_exit_keeps_it():
 def test_rank_invariant_candidates_ignore_per_rank_pruning():
     # SGLang with an a2a backend keeps only the local copy where one exists.
     pruned_rank2 = [[6, -1], [7, -1], [1, 4], [2, -1], [5, -1], [8, -1]]
-    full = MetroRepairL2Router(num_gpus=3)._build_state(_placement()).tables
-    pruned = (
-        MetroRepairL2Router(num_gpus=3)._build_state(_placement(candidates=pruned_rank2)).tables
-    )
+    full = MetroL2Router(num_gpus=3)._build_state(_placement())
+    pruned = MetroL2Router(num_gpus=3)._build_state(_placement(candidates=pruned_rank2))
     assert all(torch.equal(a, b) for a, b in zip(full.tensors(), pruned.tensors()))
 
 
 @pytest.mark.unit
 def test_inconsistent_candidates_are_rejected():
     with pytest.raises(ValueError):
-        MetroRepairL2Router(num_gpus=3).prepare_layer(
+        MetroL2Router(num_gpus=3).prepare_layer(
             _placement(candidates=[[1, 6], [3, 7], [1, 4], [2, -1], [5, -1], [8, -1]])
         )
 
@@ -225,9 +227,9 @@ def test_routers_on_every_rank_build_the_same_tables():
         for copies in _CANDIDATES:
             mine = [p for p in copies if p >= 0 and p // 3 == local]
             pruned.append((mine[:1] + [-1]) if mine else copies)
-        router = MetroRepairL2Router(num_gpus=3)
+        router = MetroL2Router(num_gpus=3)
         router.prepare_layer(_placement(candidates=pruned))
-        tables.append(router._layer_state[0].tables)
+        tables.append(router._layer_state[0])
     for other in tables[1:]:
         assert all(torch.equal(a, b) for a, b in zip(tables[0].tensors(), other.tensors()))
 
@@ -247,27 +249,26 @@ def test_decode_repairs_the_metro_assignment():
     # METRO would route [[0, 3], [1, -1]]; logical 0 moves to its copy on rank 2.
     assert decision.routed_physical_topk_ids.tolist() == [[6, 3], [1, -1]]
     assert decision.metadata["metro_assignment"] is True
-    assert decision.metadata["executed_policies"] == ("metro_repair",)
+    assert decision.metadata["repair_moves"] == 32
+    assert decision.metadata["executed_policies"] == ("metro",)
 
 
 @pytest.mark.unit
-def test_zero_moves_matches_metro():
-    metro, _ = _balancer([0.0] * 6, algorithm="metro")
-    metro.on_placement_committed(_placement())
-    request = _request([[0, 1], [2, -1]])
-    want = metro.route_tokens(request).routed_physical_topk_ids
-
-    router = MetroRepairL2Router(num_gpus=3, moves=0)
+@pytest.mark.parametrize("metadata_override", [False, True])
+def test_zero_moves_matches_greedy(metadata_override):
+    request = replace(
+        _request([[0, 1], [2, -1]]),
+        global_logical_count=torch.tensor([1.0, 1.0, 1.0, 0.0, 0.0, 0.0]),
+        policies=("metro",),
+    )
+    router = MetroL2Router(num_gpus=3, moves=32 if metadata_override else 0)
     router.prepare_layer(_placement())
-    got = router.route_tokens(
-        replace(
-            request,
-            global_logical_count=torch.tensor([1.0, 1.0, 1.0, 0.0, 0.0, 0.0]),
-            policies=("metro_repair",),
-        )
-    ).routed_physical_topk_ids
-
-    assert got.tolist() == want.tolist() == [[0, 3], [1, -1]]
+    policy = RoutingPolicyConfig("metro", metadata={"moves": 0}) if metadata_override else None
+    decision = router.route_tokens(request, policy)
+    tables = router._layer_state[0].tables
+    want = metro_route(request.logical_topk_ids, request.global_logical_count, **tables.operands())
+    assert decision.routed_physical_topk_ids.tolist() == want.tolist() == [[0, 3], [1, -1]]
+    assert decision.metadata["repair_moves"] == 0
 
 
 @pytest.mark.unit
@@ -319,6 +320,7 @@ def test_layer_without_replicas_skips_the_collective():
         physical_to_logical_map=torch.arange(6, dtype=torch.int32),
         logical_to_physical_candidates=torch.arange(6, dtype=torch.int32).view(6, 1),
         logical_to_physical_count=torch.ones(6, dtype=torch.int32),
+        default_physical_for_logical=torch.arange(6, dtype=torch.int32),
     )
     balancer.on_placement_committed(single)
 
@@ -330,7 +332,7 @@ def test_layer_without_replicas_skips_the_collective():
 
 @pytest.mark.unit
 def test_pipeline_declarations():
-    capabilities = RoutingPipeline.from_value("metro_repair").capabilities
+    capabilities = RoutingPipeline.from_value("metro").capabilities
 
     assert capabilities.consumes_global_logical_count
     assert capabilities.requires_rank_dispatch_map
@@ -339,7 +341,7 @@ def test_pipeline_declarations():
     assert not capabilities.dispatch_fixed_by_placement
     assert capabilities.graph_stability == "stable"
     with pytest.raises(ValueError):
-        RoutingPipeline.from_value("metro_repair+lplb")
+        RoutingPipeline.from_value("metro+lplb")
 
 
 # ----------------------------------------------------------------------------- CUDA
@@ -455,7 +457,7 @@ def test_cuda_graph_replays_an_updated_placement():
             logical_to_physical_count=(candidates >= 0).sum(dim=1).to(torch.int32).cuda(),
         )
 
-    router = MetroRepairL2Router(num_gpus=8)
+    router = MetroL2Router(num_gpus=8)
     router.prepare_layer(placement(first_p2l, first))
     ids = torch.randint(0, 256, (16, 8), generator=generator, dtype=torch.int32).cuda()
     counts = torch.bincount(ids.flatten().long(), minlength=256).float()
@@ -463,7 +465,7 @@ def test_cuda_graph_replays_an_updated_placement():
         layer_id=0,
         logical_topk_ids=ids,
         topk_weights=torch.ones(ids.shape, device="cuda"),
-        policies=("metro_repair",),
+        policies=("metro",),
         placement=placement(first_p2l, first),
         stage=RoutingStage.DECODE,
         global_logical_count=counts,
@@ -488,7 +490,7 @@ def test_unsupported_geometry_falls_back_to_current_metro(ranks, num_logical, de
     generator = torch.Generator().manual_seed(ranks)
     p2l, candidates = _random_placement(num_logical, ranks, ranks, generator)
     placement = _placement(p2l.tolist(), candidates.tolist(), ranks=ranks, device=device)
-    router = MetroRepairL2Router(num_gpus=ranks)
+    router = MetroL2Router(num_gpus=ranks)
     router.prepare_layer(placement)
     ids = torch.arange(num_logical, dtype=torch.int32, device=device).view(-1, 2)
     counts = torch.ones(num_logical, device=device)
@@ -498,11 +500,11 @@ def test_unsupported_geometry_falls_back_to_current_metro(ranks, num_logical, de
         topk_weights=torch.ones_like(ids),
         placement=placement,
         stage=RoutingStage.DECODE,
-        policies=("metro_repair",),
+        policies=("metro",),
         global_logical_count=counts,
     )
     decision = router.route_tokens(request)
-    tables = router._layer_state[0].tables.metro
+    tables = router._layer_state[0].tables
     want = metro_route(ids, counts, **tables.operands())
     assert torch.equal(decision.routed_physical_topk_ids, want)
     assert decision.metadata["repair_moves"] == 0
@@ -521,7 +523,7 @@ def test_out_of_range_candidates_rejected_even_if_clamping_would_match():
     bad = [row[:] for row in _CANDIDATES]
     bad[5] = [len(_P2L) + 10, -1]
     with pytest.raises(ValueError, match="disagrees"):
-        MetroRepairL2Router(num_gpus=3).prepare_layer(_placement(candidates=bad))
+        MetroL2Router(num_gpus=3).prepare_layer(_placement(candidates=bad))
 
 
 @pytest.mark.unit

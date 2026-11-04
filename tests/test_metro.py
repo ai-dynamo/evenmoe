@@ -417,7 +417,7 @@ def test_cuda_graph_replays_an_updated_placement():
             logical_to_physical_count=(candidates >= 0).sum(dim=1).to(torch.int32),
         )
 
-    router = MetroL2Router(num_gpus=8)
+    router = MetroL2Router(num_gpus=8, moves=0)
     router.prepare_layer(placement(first, first_candidates))
     ids = torch.randint(0, 256, (16, 8), generator=generator, dtype=torch.int32).cuda()
     counts = torch.bincount(ids.flatten().long(), minlength=256).float()
