@@ -405,6 +405,7 @@ def test_default_placement_planners_come_from_the_registry():
     assert "ultraep" in mlb._placement_planners
     assert "deepseek_hierarchical" in mlb._placement_planners
 
+
 @pytest.mark.unit
 @pytest.mark.parametrize("algorithm", ["disabled", "static", "dynamic", "fake", "lplb"])
 def test_replica_policies_do_not_restrict_a2a_backend(algorithm):
@@ -465,7 +466,7 @@ def test_composition_intersects_backends_and_preserves_preference(physical, shar
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("backends", [(), ("",), (1,)])
+@pytest.mark.parametrize("backends", [(), ("",), (1,), "deepep"])
 def test_policy_rejects_invalid_backend_restriction(backends):
     with pytest.raises(ValueError, match="supported_a2a_backends"):
         RoutingPolicySpec(

@@ -138,6 +138,8 @@ class RoutingPolicySpec:
     def __post_init__(self) -> None:
         object.__setattr__(self, "incompatible_with", frozenset(self.incompatible_with))
         if self.supported_a2a_backends is not None:
+            if isinstance(self.supported_a2a_backends, str):
+                raise ValueError("supported_a2a_backends must be a tuple of names, not a str.")
             backends = tuple(self.supported_a2a_backends)
             if not backends or any(not isinstance(name, str) or not name for name in backends):
                 raise ValueError("supported_a2a_backends must be None or non-empty backend names.")
