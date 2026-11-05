@@ -20,9 +20,9 @@ from evenmoe.adapters.sglang.routing import (
     SGLangRoutingOutput,
     a2a_backend_from_sglang,
     count_logical_experts,
+    resolve_sglang_a2a_backend,
     to_load_balancer_kwargs,
     to_routing_request,
-    to_sglang_a2a_backend,
     to_sglang_routing_output,
 )
 
@@ -32,11 +32,11 @@ __all__ = [
     "a2a_backend_from_sglang",
     "commit_placement",
     "count_logical_experts",
+    "resolve_sglang_a2a_backend",
     "to_load_balancer_kwargs",
     "to_placement_request",
     "to_placement_snapshot",
     "to_routing_request",
-    "to_sglang_a2a_backend",
     "to_sglang_maps",
     "to_sglang_routing_output",
 ]

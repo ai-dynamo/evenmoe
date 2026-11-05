@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from evenmoe.adapters.sglang import placement as placement_adapter
-from evenmoe.core.policy import A2A_DEEPEP, A2A_MEGAMOE
+from evenmoe.core.policy import A2A_DEEPEP, A2A_MEGAMOE, RoutingCapabilities
 from evenmoe.core.types import (
     PlacementSnapshot,
     RoutingDecision,
@@ -35,13 +35,22 @@ def a2a_backend_from_sglang(name: str | None) -> str | None:
     return _SGLANG_A2A_BACKENDS.get(name)
 
 
-def to_sglang_a2a_backend(name: str) -> str:
-    """Map an EvenMoE backend name onto SGLang's ``--moe-a2a-backend`` value."""
+def resolve_sglang_a2a_backend(capabilities: RoutingCapabilities, requested: str) -> str:
+    """The ``--moe-a2a-backend`` value SGLang should run the pipeline with.
 
-    for sglang_name, evenmoe_name in _SGLANG_A2A_BACKENDS.items():
-        if evenmoe_name == name:
-            return sglang_name
-    raise ValueError(f"SGLang has no A2A backend for EvenMoE backend {name!r}.")
+    Keeps ``requested`` when the pipeline supports it; otherwise falls back to
+    the first supported backend SGLang has, in the pipeline's preference order.
+    """
+
+    if capabilities.supports_a2a_backend(a2a_backend_from_sglang(requested)):
+        return requested
+    for name in capabilities.supported_a2a_backends or ():
+        for sglang_name, evenmoe_name in _SGLANG_A2A_BACKENDS.items():
+            if evenmoe_name == name:
+                return sglang_name
+    raise ValueError(
+        f"SGLang has no A2A backend the pipeline supports: {capabilities.supported_a2a_backends}."
+    )
 
 
 class _SGLangCollectives:
