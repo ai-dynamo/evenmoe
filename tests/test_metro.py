@@ -337,7 +337,7 @@ def test_pipeline_declarations():
 
     assert capabilities.consumes_global_logical_count
     assert capabilities.requires_rank_dispatch_map
-    assert capabilities.requires_deepep
+    assert capabilities.supported_a2a_backends == ("deepep",)
     assert not capabilities.supports_concurrent_microbatches
     assert not capabilities.dispatch_fixed_by_placement
     assert capabilities.graph_stability == "stable"

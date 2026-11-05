@@ -356,7 +356,7 @@ ROUTING_POLICY = RoutingPolicySpec(
     requires_placement_state=True,
     # Prefill and mixed steps fall back to the framework's static replica map.
     requires_rank_dispatch_map=True,
-    requires_deepep=True,
+    supported_a2a_backends=("deepep",),
     # One scratch workspace per layer.
     supports_concurrent_microbatches=False,
     requires_redundancy=True,

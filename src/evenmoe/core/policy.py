@@ -55,7 +55,11 @@ class RoutingCapabilities:
     requires_placement_state: bool = False
     requires_rank_dispatch_map: bool = False
     routes_shared_expert: bool = False
-    requires_deepep: bool = False
+    supported_a2a_backends: tuple[str, ...] | None = None
+    """Allowed dispatch backends, in fallback preference order.
+    None adds no backend restriction; a non-empty tuple limits selection.
+    Frameworks preserve a supported selection and may use the first entry
+    when choosing a default."""
     dispatch_fixed_by_placement: bool = False
     """The per-token answer is a pure function of the committed placement, so a
     framework may materialise it once per placement and skip the per-forward
@@ -120,7 +124,7 @@ class RoutingPolicySpec:
     rank_load: str | None = None
     requires_placement_state: bool = False
     requires_rank_dispatch_map: bool = False
-    requires_deepep: bool = False
+    supported_a2a_backends: tuple[str, ...] | None = None
     dispatch_fixed_by_placement: bool = False
     supports_concurrent_microbatches: bool = True
     graph_stability: str = "stable"
@@ -133,6 +137,11 @@ class RoutingPolicySpec:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "incompatible_with", frozenset(self.incompatible_with))
+        if self.supported_a2a_backends is not None:
+            backends = tuple(self.supported_a2a_backends)
+            if not backends or any(not isinstance(name, str) or not name for name in backends):
+                raise ValueError("supported_a2a_backends must be None or non-empty backend names.")
+            object.__setattr__(self, "supported_a2a_backends", backends)
         if self.logical_count not in _DATA_VIEWS:
             raise ValueError("logical_count must be None, 'local', or 'global'.")
         if self.rank_load not in _DATA_VIEWS:

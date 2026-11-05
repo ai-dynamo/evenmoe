@@ -66,7 +66,7 @@ def test_pipeline_capabilities_hide_algorithm_selection_from_framework_glue():
     assert pipeline.capabilities.requires_post_topk_routing
     assert pipeline.capabilities.requires_placement_state
     assert pipeline.capabilities.routes_shared_expert
-    assert pipeline.capabilities.requires_deepep
+    assert pipeline.capabilities.supported_a2a_backends == ("deepep", "megamoe")
     assert not pipeline.capabilities.requires_rank_dispatch_map
 
 
@@ -284,7 +284,7 @@ def test_pipeline_reads_phase_and_capabilities_from_registered_policy():
         name="external",
         phase=RoutingPhase.SHARED_EXPERT,
         rank_load="local",
-        requires_deepep=True,
+        supported_a2a_backends=("deepep", "megamoe"),
     )
     registry = PolicyRegistry(
         physical_routers={"static": RoutingPipeline.from_value("static").steps[0].spec},
@@ -296,7 +296,7 @@ def test_pipeline_reads_phase_and_capabilities_from_registered_policy():
 
     assert pipeline.policies == ("static", "external")
     assert pipeline.capabilities.routes_shared_expert
-    assert pipeline.capabilities.requires_deepep
+    assert pipeline.capabilities.supported_a2a_backends == ("deepep", "megamoe")
 
 
 @pytest.mark.unit
@@ -404,3 +404,70 @@ def test_default_placement_planners_come_from_the_registry():
     assert set(mlb._placement_planners) == set(builtin_registry().placement_planners)
     assert "ultraep" in mlb._placement_planners
     assert "deepseek_hierarchical" in mlb._placement_planners
+
+@pytest.mark.unit
+@pytest.mark.parametrize("algorithm", ["disabled", "static", "dynamic", "fake", "lplb"])
+def test_replica_policies_do_not_restrict_a2a_backend(algorithm):
+    assert RoutingPipeline.from_value(algorithm).capabilities.supported_a2a_backends is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("algorithm", ["waterfill", "lplb+waterfill", "dynamic+waterfill"])
+def test_waterfill_supports_deepep_and_megamoe(algorithm):
+    assert RoutingPipeline.from_value(algorithm).capabilities.supported_a2a_backends == (
+        "deepep",
+        "megamoe",
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("algorithm", ["ultraep", "metro", "ultraep+waterfill", "metro+waterfill"])
+def test_deepep_only_policy_keeps_its_restriction(algorithm):
+    assert RoutingPipeline.from_value(algorithm).capabilities.supported_a2a_backends == ("deepep",)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "physical, shared, expected",
+    [
+        (None, None, None),
+        (("megamoe", "deepep"), None, ("megamoe", "deepep")),
+        (None, ("custom",), ("custom",)),
+        (("megamoe", "deepep"), ("deepep", "megamoe"), ("megamoe", "deepep")),
+        (("megamoe", "deepep"), ("deepep",), ("deepep",)),
+        (("megamoe",), ("deepep",), ()),
+    ],
+)
+def test_composition_intersects_backends_and_preserves_preference(physical, shared, expected):
+    registry = PolicyRegistry(
+        physical_routers={
+            "physical": RoutingPolicySpec(
+                "physical", RoutingPhase.PHYSICAL_ROUTING, supported_a2a_backends=physical
+            )
+        },
+        shared_expert_routers={
+            "shared": RoutingPolicySpec(
+                "shared", RoutingPhase.SHARED_EXPERT, supported_a2a_backends=shared
+            )
+        },
+        default_physical_router="physical",
+    )
+    if expected == ():
+        with pytest.raises(ValueError, match="no common supported A2A backend"):
+            RoutingPipeline.from_value("shared", registry=registry)
+    else:
+        assert (
+            RoutingPipeline.from_value(
+                "shared", registry=registry
+            ).capabilities.supported_a2a_backends
+            == expected
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("backends", [(), ("",), (1,)])
+def test_policy_rejects_invalid_backend_restriction(backends):
+    with pytest.raises(ValueError, match="supported_a2a_backends"):
+        RoutingPolicySpec(
+            "external", RoutingPhase.PHYSICAL_ROUTING, supported_a2a_backends=backends
+        )

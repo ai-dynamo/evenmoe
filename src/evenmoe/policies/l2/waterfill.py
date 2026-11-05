@@ -177,7 +177,7 @@ ROUTING_POLICY = RoutingPolicySpec(
     "waterfill",
     WaterfillL2Router.phase,
     rank_load="local",
-    requires_deepep=True,
+    supported_a2a_backends=("deepep", "megamoe"),
     configure=_configure,
     build_router=_build_router,
 )
