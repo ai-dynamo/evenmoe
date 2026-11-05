@@ -8,7 +8,7 @@ from __future__ import annotations
 import torch
 
 from evenmoe.core.l2 import TokenRouter
-from evenmoe.core.policy import RoutingPolicySpec
+from evenmoe.core.policy import A2A_DEEPEP, RoutingPolicySpec
 from evenmoe.core.types import (
     RoutingDecision,
     RoutingPhase,
@@ -108,7 +108,7 @@ ROUTING_POLICY = RoutingPolicySpec(
     "ultraep",
     UltraEPL2Router.phase,
     requires_placement_state=True,
-    supported_a2a_backends=("deepep",),
+    supported_a2a_backends=(A2A_DEEPEP,),
     supports_concurrent_microbatches=False,
     graph_stability="realloc_on_placement_change",
     required_placement="ultraep",

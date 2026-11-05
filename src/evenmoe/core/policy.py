@@ -19,6 +19,12 @@ from evenmoe.core.l2 import TokenRouter
 from evenmoe.core.types import RoutingPhase, RoutingPolicyConfig, TensorLike
 
 _DATA_VIEWS = (None, "local", "global")
+
+A2A_DEEPEP = "deepep"
+A2A_MEGAMOE = "megamoe"
+"""EvenMoE's names for A2A dispatch backends, as ``supported_a2a_backends`` uses
+them. They are not framework flag values: each framework adapter translates its
+own backend names (``a2a_backend_from_sglang``, ``a2a_backend_from_vllm``)."""
 _GRAPH_STABILITIES = ("stable", "realloc_on_placement_change")
 
 
@@ -56,10 +62,10 @@ class RoutingCapabilities:
     requires_rank_dispatch_map: bool = False
     routes_shared_expert: bool = False
     supported_a2a_backends: tuple[str, ...] | None = None
-    """Allowed dispatch backends, in fallback preference order.
-    None adds no backend restriction; a non-empty tuple limits selection.
-    Frameworks preserve a supported selection and may use the first entry
-    when choosing a default."""
+    """Allowed dispatch backends by EvenMoE name (``A2A_DEEPEP``, ...), in
+    fallback preference order. None adds no backend restriction; a non-empty
+    tuple limits selection. Frameworks preserve a supported selection and may
+    use the first entry when choosing a default."""
     dispatch_fixed_by_placement: bool = False
     """The per-token answer is a pure function of the committed placement, so a
     framework may materialise it once per placement and skip the per-forward
@@ -77,6 +83,16 @@ class RoutingCapabilities:
     graph_stability: str = "stable"
     """``stable``, or ``realloc_on_placement_change`` when a placement update can
     replace policy tensors and invalidate a captured graph."""
+
+    def supports_a2a_backend(self, backend: str | None) -> bool:
+        """Whether a backend, by its EvenMoE name, satisfies this pipeline.
+
+        ``None`` stands for a framework backend that has no EvenMoE name; it
+        satisfies only an unrestricted pipeline.
+        """
+        if self.supported_a2a_backends is None:
+            return True
+        return backend in self.supported_a2a_backends
 
 
 @dataclass(frozen=True)

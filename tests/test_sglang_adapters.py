@@ -6,12 +6,21 @@ from __future__ import annotations
 import pytest
 import torch
 
-from evenmoe import PlacementPlan, RoutingDecision, RoutingPolicyConfig
+from evenmoe import (
+    A2A_DEEPEP,
+    A2A_MEGAMOE,
+    PlacementPlan,
+    RoutingDecision,
+    RoutingPipeline,
+    RoutingPolicyConfig,
+)
 from evenmoe.adapters.sglang import (
+    a2a_backend_from_sglang,
     count_logical_experts,
     to_placement_request,
     to_placement_snapshot,
     to_routing_request,
+    to_sglang_a2a_backend,
     to_sglang_maps,
     to_sglang_routing_output,
 )
@@ -140,3 +149,36 @@ def test_post_adapter_does_not_append_when_waterfill_did_not_run():
     )
     assert output.topk_ids is ids
     assert output.topk_weights is weights
+
+
+@pytest.mark.unit
+def test_sglang_a2a_backend_names_round_trip():
+    for name in ("deepep", "megamoe"):
+        assert to_sglang_a2a_backend(a2a_backend_from_sglang(name)) == name
+    assert a2a_backend_from_sglang("ascend_ops") is None
+    assert a2a_backend_from_sglang(None) is None
+    with pytest.raises(ValueError, match="no A2A backend"):
+        to_sglang_a2a_backend("unknown")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "algorithm, backend, supported",
+    [
+        ("waterfill", "megamoe", True),
+        ("waterfill", "deepep", True),
+        ("waterfill", "flashinfer", False),
+        ("ultraep", "megamoe", False),
+        ("lplb", "flashinfer", True),
+    ],
+)
+def test_sglang_backend_checks_against_pipeline(algorithm, backend, supported):
+    capabilities = RoutingPipeline.from_value(algorithm).capabilities
+    assert capabilities.supports_a2a_backend(a2a_backend_from_sglang(backend)) is supported
+
+
+@pytest.mark.unit
+def test_sglang_fallback_is_the_first_supported_backend():
+    capabilities = RoutingPipeline.from_value("waterfill").capabilities
+    assert capabilities.supported_a2a_backends == (A2A_DEEPEP, A2A_MEGAMOE)
+    assert to_sglang_a2a_backend(capabilities.supported_a2a_backends[0]) == "deepep"

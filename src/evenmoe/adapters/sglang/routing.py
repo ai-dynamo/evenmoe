@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from evenmoe.adapters.sglang import placement as placement_adapter
+from evenmoe.core.policy import A2A_DEEPEP, A2A_MEGAMOE
 from evenmoe.core.types import (
     PlacementSnapshot,
     RoutingDecision,
@@ -20,6 +21,27 @@ from evenmoe.core.types import (
 if TYPE_CHECKING:
     import torch
     from sglang.srt.runtime_context import RuntimeContext
+
+
+# SGLang --moe-a2a-backend -> EvenMoE backend name.
+_SGLANG_A2A_BACKENDS = {"deepep": A2A_DEEPEP, "megamoe": A2A_MEGAMOE}
+
+
+def a2a_backend_from_sglang(name: str | None) -> str | None:
+    """Map SGLang's ``--moe-a2a-backend`` onto EvenMoE's name, or None if it has none."""
+
+    if name is None:
+        return None
+    return _SGLANG_A2A_BACKENDS.get(name)
+
+
+def to_sglang_a2a_backend(name: str) -> str:
+    """Map an EvenMoE backend name onto SGLang's ``--moe-a2a-backend`` value."""
+
+    for sglang_name, evenmoe_name in _SGLANG_A2A_BACKENDS.items():
+        if evenmoe_name == name:
+            return sglang_name
+    raise ValueError(f"SGLang has no A2A backend for EvenMoE backend {name!r}.")
 
 
 class _SGLangCollectives:

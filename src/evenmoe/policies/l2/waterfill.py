@@ -36,7 +36,7 @@ import torch
 from torch import Tensor
 
 from evenmoe.core.l2 import TokenRouter
-from evenmoe.core.policy import RouterBuildContext, RoutingPolicySpec
+from evenmoe.core.policy import A2A_DEEPEP, A2A_MEGAMOE, RouterBuildContext, RoutingPolicySpec
 from evenmoe.core.types import (
     RoutingDecision,
     RoutingPhase,
@@ -177,7 +177,7 @@ ROUTING_POLICY = RoutingPolicySpec(
     "waterfill",
     WaterfillL2Router.phase,
     rank_load="local",
-    supported_a2a_backends=("deepep", "megamoe"),
+    supported_a2a_backends=(A2A_DEEPEP, A2A_MEGAMOE),
     configure=_configure,
     build_router=_build_router,
 )

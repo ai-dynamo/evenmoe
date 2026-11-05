@@ -11,6 +11,8 @@ from evenmoe.core.l2 import (
 )
 from evenmoe.core.orchestrator import MoELoadBalancer
 from evenmoe.core.policy import (
+    A2A_DEEPEP,
+    A2A_MEGAMOE,
     ExpertDeploymentConfig,
     InputTransformSpec,
     PolicyRegistry,
@@ -37,6 +39,8 @@ from evenmoe.core.types import (
 from evenmoe.kernels.lplb import LPLBKernels
 
 __all__ = [
+    "A2A_DEEPEP",
+    "A2A_MEGAMOE",
     "ExpertDeploymentConfig",
     "InputTransformSpec",
     "LPLBKernels",

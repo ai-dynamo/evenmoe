@@ -14,6 +14,7 @@ from evenmoe.adapters.vllm.placement import (
     to_vllm_physical_to_logical,
 )
 from evenmoe.adapters.vllm.routing import (
+    a2a_backend_from_vllm,
     build_physical_to_rank_map,
     collapse_candidates_to_local,
     nearest_replica_table,
@@ -26,6 +27,7 @@ from evenmoe.adapters.vllm.routing import (
 
 __all__ = [
     "VllmPlacementMaps",
+    "a2a_backend_from_vllm",
     "build_physical_to_rank_map",
     "collapse_candidates_to_local",
     "nearest_replica_table",
