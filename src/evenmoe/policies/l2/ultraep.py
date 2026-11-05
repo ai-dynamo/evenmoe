@@ -108,7 +108,7 @@ ROUTING_POLICY = RoutingPolicySpec(
     "ultraep",
     UltraEPL2Router.phase,
     requires_placement_state=True,
-    requires_deepep=True,
+    supported_a2a_backends=("deepep",),
     supports_concurrent_microbatches=False,
     graph_stability="realloc_on_placement_change",
     required_placement="ultraep",
