@@ -9,7 +9,11 @@ uses the EP-wide active set of each layer to send every active replicated
 expert to exactly one rank, choosing ranks greedily so the per-rank count of
 active experts stays even. Every rank derives the same choice from the same
 all-reduced count and the same tables, so no further coordination is needed.
-See :mod:`evenmoe.kernels.ops.metro` for the algorithm.
+The implementation follows the greedy assignment with at most 32 bounded
+repair steps, stopping at a lower bound on the busiest rank's active experts.
+The repair kernel covers up to 256 experts and 32 ranks; other geometries use
+the greedy kernel. Both are internal implementations of the same policy.
+Policy metadata ``moves=0`` selects the original greedy path for comparison.
 
 The tables come from the physical-to-logical map, which is the same on every
 EP rank. A framework may narrow ``logical_to_physical_candidates`` to the
@@ -41,12 +45,15 @@ from evenmoe.core.types import (
 from evenmoe.kernels.ops.metro import (
     MAX_RANKS,
     metro_mask_words,
+    metro_repair_route,
     metro_route,
     metro_workspace,
+    supports_repair,
 )
 from evenmoe.policies.l2.replica import route_static_replicas
 
 _STATIC_STAGES = frozenset({RoutingStage.PREFILL, RoutingStage.MIXED})
+DEFAULT_MOVES = 32
 
 
 @dataclass(frozen=True)
@@ -67,6 +74,9 @@ class MetroTables:
     rep_mask: Tensor
     rep_phys: Tensor
     num_replicated: Tensor
+    # Empty for geometries handled by the greedy kernel only.
+    physical_by_rank: Tensor
+    holder_mask: Tensor
 
     def operands(self) -> dict[str, Tensor]:
         """The keyword tables :func:`metro_route` takes."""
@@ -80,8 +90,15 @@ class MetroTables:
             "num_replicated": self.num_replicated,
         }
 
+    def repair_operands(self) -> dict[str, Tensor]:
+        return {
+            "holder_mask": self.holder_mask,
+            "physical_by_rank": self.physical_by_rank,
+            "default_physical": self.default_physical,
+        }
+
     def tensors(self) -> tuple[Tensor, ...]:
-        return tuple(self.operands().values())
+        return (*self.operands().values(), self.physical_by_rank, self.holder_mask)
 
 
 def metro_capacity(num_logical: int, num_physical: int) -> int:
@@ -147,6 +164,7 @@ def build_metro_tables(
     rep_logical[:count] = replicated.to(torch.int32)
     rep_mask[:count] = rank_mask[replicated]
     rep_phys[:count] = physical_by_rank[replicated].to(torch.int32)
+    repair = supports_repair(num_logical, num_ranks)
     return MetroTables(
         num_logical=num_logical,
         num_ranks=num_ranks,
@@ -157,6 +175,10 @@ def build_metro_tables(
         rep_mask=rep_mask,
         rep_phys=rep_phys,
         num_replicated=torch.tensor([count], dtype=torch.int32, device=device),
+        physical_by_rank=(
+            physical_by_rank.to(torch.int32) if repair else rep_phys.new_empty((0, 0))
+        ),
+        holder_mask=rank_mask[:, 0].contiguous() if repair else rep_mask.new_empty(0),
     )
 
 
@@ -186,10 +208,21 @@ class MetroL2Router(TokenRouter):
 
     phase = RoutingPhase.PHYSICAL_ROUTING
 
-    def __init__(self, *, num_gpus: int, out_dtype: torch.dtype | None = torch.int64):
+    def __init__(
+        self,
+        *,
+        num_gpus: int,
+        moves: int = DEFAULT_MOVES,
+        early_exit: bool = True,
+        out_dtype: torch.dtype | None = torch.int64,
+    ):
         if num_gpus <= 0:
             raise ValueError("MetroL2Router.num_gpus must be positive.")
+        if moves < 0:
+            raise ValueError("MetroL2Router.moves must be non-negative.")
         self.num_gpus = num_gpus
+        self.moves = moves
+        self.early_exit = early_exit
         self.out_dtype = out_dtype
         self._layer_state: dict[int, _MetroLayerState] = {}
 
@@ -263,19 +296,36 @@ class MetroL2Router(TokenRouter):
             )
         if not isinstance(counts, Tensor):
             raise TypeError("MetroL2Router requires a torch.Tensor global_logical_count.")
+        moves = int(policy.metadata.get("moves", self.moves))
+        if moves < 0:
+            raise ValueError("METRO moves must be non-negative.")
+        early_exit = bool(policy.metadata.get("early_exit", self.early_exit))
         token_count = request.token_count
-        physical = metro_route(
-            topk_ids,
-            counts,
-            **state.tables.operands(),
-            num_token_non_padded=token_count if isinstance(token_count, Tensor) else None,
-            workspace=state.workspace,
-            out_dtype=out_dtype,
-        )
+        gate = token_count if isinstance(token_count, Tensor) else None
+        if moves == 0 or state.tables.physical_by_rank.numel() == 0:
+            physical = metro_route(
+                topk_ids,
+                counts,
+                **state.tables.operands(),
+                num_token_non_padded=gate,
+                workspace=state.workspace,
+                out_dtype=out_dtype,
+            )
+            moves = 0
+        else:
+            physical = metro_repair_route(
+                topk_ids,
+                **state.tables.repair_operands(),
+                counts=counts,
+                num_token_non_padded=gate,
+                moves=moves,
+                early_exit=early_exit,
+                out_dtype=out_dtype,
+            )
         return RoutingDecision(
             routed_physical_topk_ids=physical,
             topk_weights=request.topk_weights,
-            metadata={"policy": policy.name, "metro_assignment": True},
+            metadata={"policy": policy.name, "metro_assignment": True, "repair_moves": moves},
         )
 
     def _state(self, layer_id: int, placement: PlacementSnapshot) -> _MetroLayerState:
