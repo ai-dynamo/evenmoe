@@ -6,8 +6,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-from evenmoe import PlacementPlan, RoutingDecision, RoutingStage
+from evenmoe import A2A_DEEPEP, PlacementPlan, RoutingDecision, RoutingPipeline, RoutingStage
 from evenmoe.adapters.vllm import (
+    a2a_backend_from_vllm,
     collapse_candidates_to_local,
     nearest_replica_table,
     stage_from_vllm,
@@ -326,3 +327,14 @@ def test_single_node_fallback_shares_evenly_as_sglang_does():
     assert picks[4] == 8
     # Everyone else is shared evenly between the two copies.
     assert sorted(picks[r] for r in (1, 2, 3, 5, 6, 7)) == [0, 0, 0, 8, 8, 8]
+
+
+@pytest.mark.unit
+def test_vllm_a2a_backend_names_map_both_deepep_modes():
+    assert a2a_backend_from_vllm("deepep_high_throughput") == A2A_DEEPEP
+    assert a2a_backend_from_vllm("deepep_low_latency") == A2A_DEEPEP
+    assert a2a_backend_from_vllm("allgather_reducescatter") is None
+    assert a2a_backend_from_vllm(None) is None
+    capabilities = RoutingPipeline.from_value("metro").capabilities
+    assert capabilities.supports_a2a_backend(a2a_backend_from_vllm("deepep_low_latency"))
+    assert not capabilities.supports_a2a_backend(a2a_backend_from_vllm("naive"))

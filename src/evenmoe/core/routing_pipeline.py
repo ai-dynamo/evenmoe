@@ -209,6 +209,18 @@ class RoutingPipeline:
 
 def _merge_capabilities(steps: Sequence[_RoutingStep]) -> RoutingCapabilities:
     specs = [step.spec for step in steps]
+    supported_backends: tuple[str, ...] | None = None
+    for spec in specs:
+        if spec.supported_a2a_backends is None:
+            continue
+        if supported_backends is None:
+            supported_backends = spec.supported_a2a_backends
+        else:
+            supported_backends = tuple(
+                backend for backend in supported_backends if backend in spec.supported_a2a_backends
+            )
+        if not supported_backends:
+            raise ValueError("Routing policies have no common supported A2A backend.")
     return RoutingCapabilities(
         requires_post_topk_routing=bool(steps),
         requires_placement_state=any(spec.requires_placement_state for spec in specs),
@@ -216,7 +228,7 @@ def _merge_capabilities(steps: Sequence[_RoutingStep]) -> RoutingCapabilities:
         routes_shared_expert=any(
             step.spec.phase is RoutingPhase.SHARED_EXPERT for step in steps
         ),
-        requires_deepep=any(spec.requires_deepep for spec in specs),
+        supported_a2a_backends=supported_backends,
         # An input transform only perturbs the pre-TopK stimulus; it does not
         # make the logical->physical answer depend on the batch, so ``fake+static``
         # stays a deterministic, placement-fixed dispatch.

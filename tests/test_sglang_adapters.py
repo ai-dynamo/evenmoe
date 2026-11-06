@@ -6,9 +6,19 @@ from __future__ import annotations
 import pytest
 import torch
 
-from evenmoe import PlacementPlan, RoutingDecision, RoutingPolicyConfig
+from evenmoe import (
+    A2A_DEEPEP,
+    A2A_MEGAMOE,
+    PlacementPlan,
+    RoutingCapabilities,
+    RoutingDecision,
+    RoutingPipeline,
+    RoutingPolicyConfig,
+)
 from evenmoe.adapters.sglang import (
+    a2a_backend_from_sglang,
     count_logical_experts,
+    resolve_sglang_a2a_backend,
     to_placement_request,
     to_placement_snapshot,
     to_routing_request,
@@ -140,3 +150,37 @@ def test_post_adapter_does_not_append_when_waterfill_did_not_run():
     )
     assert output.topk_ids is ids
     assert output.topk_weights is weights
+
+
+@pytest.mark.unit
+def test_sglang_a2a_backend_names():
+    assert a2a_backend_from_sglang("deepep") == A2A_DEEPEP
+    assert a2a_backend_from_sglang("megamoe") == A2A_MEGAMOE
+    assert a2a_backend_from_sglang("ascend_ops") is None
+    assert a2a_backend_from_sglang(None) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "algorithm, requested, resolved",
+    [
+        ("waterfill", "megamoe", "megamoe"),
+        ("waterfill", "deepep", "deepep"),
+        ("waterfill", "flashinfer", "deepep"),
+        ("ultraep", "megamoe", "deepep"),
+        ("lplb", "flashinfer", "flashinfer"),
+        ("lplb", "none", "none"),
+    ],
+)
+def test_sglang_backend_resolution_keeps_supported_choice(algorithm, requested, resolved):
+    capabilities = RoutingPipeline.from_value(algorithm).capabilities
+    assert resolve_sglang_a2a_backend(capabilities, requested) == resolved
+
+
+@pytest.mark.unit
+def test_sglang_fallback_skips_backends_sglang_does_not_have():
+    capabilities = RoutingCapabilities(supported_a2a_backends=("hybridep", A2A_MEGAMOE))
+    assert resolve_sglang_a2a_backend(capabilities, "deepep") == "megamoe"
+    sglang_has_none = RoutingCapabilities(supported_a2a_backends=("hybridep",))
+    with pytest.raises(ValueError, match="no A2A backend"):
+        resolve_sglang_a2a_backend(sglang_has_none, "deepep")

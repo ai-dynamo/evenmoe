@@ -6,6 +6,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+from evenmoe.core.policy import A2A_DEEPEP
 from evenmoe.core.types import (
     PlacementSnapshot,
     RoutingDecision,
@@ -25,6 +26,14 @@ _VLLM_MODE_TO_STAGE = {
     "decode": RoutingStage.DECODE,
     "mixed": RoutingStage.MIXED,
     "spec": RoutingStage.SPECULATIVE,
+}
+
+
+# vLLM --all2all-backend -> EvenMoE backend name. Both DeepEP kernel modes are
+# DeepEP; vLLM has no MegaMoE backend.
+_VLLM_A2A_BACKENDS = {
+    "deepep_high_throughput": A2A_DEEPEP,
+    "deepep_low_latency": A2A_DEEPEP,
 }
 
 
@@ -336,6 +345,14 @@ def to_vllm_shared_expert_rank(decision: RoutingDecision) -> TensorLike | None:
     """
 
     return decision.shared_expert_rank
+
+
+def a2a_backend_from_vllm(name: str | None) -> str | None:
+    """Map vLLM's ``--all2all-backend`` onto EvenMoE's name, or None if it has none."""
+
+    if name is None:
+        return None
+    return _VLLM_A2A_BACKENDS.get(name)
 
 
 def stage_from_vllm(name: str | None) -> RoutingStage | None:
