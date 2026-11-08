@@ -3,14 +3,15 @@
 import hashlib
 import math
 import unittest
-from prepare_workloads import SUBSETS, split_tasks, sample
+
+from prepare_workloads import SUBSETS, sample, split_tasks
 from summarize import summarize
 
 
 class ToolsTest(unittest.TestCase):
     def test_deterministic_disjoint_stratified_sampling(self):
-        rows = [dict(subset=s, task_id=f'{i:03}',
-                     prompt_sha256=hashlib.sha256(f'{s}/{i}'.encode()).hexdigest())
+        rows = [{'subset': s, 'task_id': f'{i:03}',
+                     'prompt_sha256': hashlib.sha256(f'{s}/{i}'.encode()).hexdigest()}
                 for s, (count, _, _) in SUBSETS.items() for i in range(count)]
         calibration, test = split_tasks(rows)
         calibration2, test2 = split_tasks(list(reversed(rows)))
@@ -29,10 +30,10 @@ class ToolsTest(unittest.TestCase):
             {r['prompt_sha256'] for g in test.values() for r in g}))
 
     def fixture(self):
-        plan = dict(stage='prefill', policies=['baseline'], concurrencies=[8],
-                    seeds=[8,28,2026], sessions_per_seed=1, rounds_per_session=3)
-        rows = [dict(stage='prefill', policy='baseline', concurrency=8, seed=seed,
-                     session=1, round=rnd, status='ok', ktokens_s=value)
+        plan = {'stage': 'prefill', 'policies': ['baseline'], 'concurrencies': [8],
+                    'seeds': [8,28,2026], 'sessions_per_seed': 1, 'rounds_per_session': 3}
+        rows = [{'stage': 'prefill', 'policy': 'baseline', 'concurrency': 8, 'seed': seed,
+                     'session': 1, 'round': rnd, 'status': 'ok', 'ktokens_s': value}
                 for seed, mid in zip(plan['seeds'], [2,4,8])
                 for rnd, value in enumerate([mid, mid, 100], 1)]
         return plan, rows

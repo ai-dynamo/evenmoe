@@ -4,8 +4,8 @@ import argparse
 import itertools
 import json
 import math
-from pathlib import Path
 import statistics
+from pathlib import Path
 
 
 def summarize(plan, rows):
@@ -42,11 +42,11 @@ def summarize(plan, rows):
     for policy, conc in itertools.product(policies, concurrencies):
         keys = {k for k in expected if k[:2] == (policy, conc)}
         missing = sorted(keys - values.keys())
-        result = dict(policy=policy, concurrency=conc,
-                      status='incomplete' if missing else 'complete',
-                      valid_rounds=len(keys & values.keys()), expected_rounds=len(keys),
-                      missing_or_invalid=[dict(seed=k[2], session=k[3], round=k[4],
-                                               reason=rejected.get(k, 'missing')) for k in missing])
+        result = {'policy': policy, 'concurrency': conc,
+                      'status': 'incomplete' if missing else 'complete',
+                      'valid_rounds': len(keys & values.keys()), 'expected_rounds': len(keys),
+                      'missing_or_invalid': [{'seed': k[2], 'session': k[3], 'round': k[4],
+                                               'reason': rejected.get(k, 'missing')} for k in missing]}
         if not missing:
             by_seed = {}
             for seed in seeds:
@@ -60,9 +60,9 @@ def summarize(plan, rows):
                           statistic_level='seed medians' if len(seeds) > 1 else 'session medians',
                           seed_medians=seed_medians, session_medians=by_seed)
         results.append(result)
-    return dict(status='complete' if all(r['status']=='complete' for r in results) else 'incomplete',
-                stage=plan['stage'], units='K input tokens/s' if plan['stage']=='prefill' else 'K output tokens/s',
-                raw_audit_performed=False, results=results)
+    return {'status': 'complete' if all(r['status']=='complete' for r in results) else 'incomplete',
+                'stage': plan['stage'], 'units': 'K input tokens/s' if plan['stage']=='prefill' else 'K output tokens/s',
+                'raw_audit_performed': False, 'results': results}
 
 
 def main():
@@ -78,7 +78,7 @@ def main():
     with args.output.open('x') as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
         f.write('\n')
-    print(json.dumps(dict(status=result['status'], conditions=len(result['results']))))
+    print(json.dumps({'status': result['status'], 'conditions': len(result['results'])}))
 
 
 if __name__ == '__main__':

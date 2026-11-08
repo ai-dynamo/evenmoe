@@ -7,13 +7,12 @@ Archives and task instructions are read as data, never executed.
 import argparse
 import hashlib
 import json
-from pathlib import Path
 import random
 import shutil
 import subprocess
 import sys
 import tarfile
-import urllib.request
+from pathlib import Path
 
 OUT = None
 TOKENIZER = None
@@ -78,9 +77,9 @@ def download():
             marker.write_text(expected + '\n')
             shutil.rmtree(stage)
         assert marker.read_text().strip() == expected
-        entries.append(dict(subset=subset, archive=str(path), sha256=expected, path=str(target)))
-    write(OUT / 'source.json', dict(dataset_revision=REVISION, reference_repository_revision=GIT_REVISION,
-                                   checksum_file_sha256=sha(sums), archives=entries))
+        entries.append({'subset': subset, 'archive': str(path), 'sha256': expected, 'path': str(target)})
+    write(OUT / 'source.json', {'dataset_revision': REVISION, 'reference_repository_revision': GIT_REVISION,
+                                   'checksum_file_sha256': sha(sums), 'archives': entries})
 
 def split_tasks(rows):
     calibration, test = {}, {}
@@ -125,10 +124,10 @@ def prepare():
             # Decode bytes directly to preserve original newlines.
             prompt = path.read_bytes().decode('utf-8')
             assert prompt.strip(), path
-            rows.append(dict(subset=entry['subset'], task_id=task.name, initial_step=step,
-                             task_config_sha256=sha(config_path),
-                             prompt=prompt, prompt_sha256=sha(path), source=str(path),
-                             expected_prompt_tokens=len(tokenizer.encode(prompt, add_special_tokens=True))))
+            rows.append({'subset': entry['subset'], 'task_id': task.name, 'initial_step': step,
+                             'task_config_sha256': sha(config_path),
+                             'prompt': prompt, 'prompt_sha256': sha(path), 'source': str(path),
+                             'expected_prompt_tokens': len(tokenizer.encode(prompt, add_special_tokens=True))})
     assert len({(r['subset'], r['task_id']) for r in rows}) == 260
     assert all(0 < r['expected_prompt_tokens'] < 16384 for r in rows), 'Context limit exceeded; no truncation allowed'
     calibration, test = split_tasks(rows)
@@ -144,19 +143,19 @@ def prepare():
         else:
             path.write_text(text)
         sizes = sorted(r['expected_prompt_tokens'] for r in records)
-        workloads[name] = dict(path=str(path), sha256=sha(path), count=len(records),
-            total_input_tokens=sum(sizes), min_input_tokens=sizes[0], max_input_tokens=sizes[-1],
-            median_input_tokens=(sizes[499] + sizes[500]) / 2,
-            unique_tasks=len({(r['subset'], r['task_id']) for r in records}))
+        workloads[name] = {'path': str(path), 'sha256': sha(path), 'count': len(records),
+            'total_input_tokens': sum(sizes), 'min_input_tokens': sizes[0], 'max_input_tokens': sizes[-1],
+            'median_input_tokens': (sizes[499] + sizes[500]) / 2,
+            'unique_tasks': len({(r['subset'], r['task_id']) for r in records})}
     write(OUT / 'tasks.json', rows)
-    write(OUT / 'assets.json', dict(status='ok', source=source, seeds=SEEDS,
-        python=sys.version, calibration_seed=0, subsets=SUBSETS,
-        instruction_selection='Top-level instruction.md, or first declared step for multi-step tasks. No concatenation or later-step context.',
-        tokenizer_files={n: sha(TOKENIZER / n) for n in ('tokenizer.json', 'tokenizer_config.json')},
-        split={name: {k: [r['task_id'] for r in v] for k, v in pool.items()}
+    write(OUT / 'assets.json', {'status': 'ok', 'source': source, 'seeds': SEEDS,
+        'python': sys.version, 'calibration_seed': 0, 'subsets': SUBSETS,
+        'instruction_selection': 'Top-level instruction.md, or first declared step for multi-step tasks. No concatenation or later-step context.',
+        'tokenizer_files': {n: sha(TOKENIZER / n) for n in ('tokenizer.json', 'tokenizer_config.json')},
+        'split': {name: {k: [r['task_id'] for r in v] for k, v in pool.items()}
                for name, pool in [('calibration', calibration), ('test', test)]},
-        workloads=workloads, instruction_tokens=dict(min=min(r['expected_prompt_tokens'] for r in rows),
-                                                    max=max(r['expected_prompt_tokens'] for r in rows))))
+        'workloads': workloads, 'instruction_tokens': {'min': min(r['expected_prompt_tokens'] for r in rows),
+                                                    'max': max(r['expected_prompt_tokens'] for r in rows)}})
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
