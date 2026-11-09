@@ -75,3 +75,19 @@ The Apache License 2.0 text is provided in the repository's `LICENSE` file.
 
 The original MIT license is retained at
 `src/evenmoe/kernels/ultraep/LICENSE.ultraep`.
+
+## MegaMoE example dependencies and Tile-aware Waterfill
+
+- Local example: `examples/megamoe/` (not installed as part of the EvenMoE wheel).
+- TWF source: <https://github.com/xutizhou/sglang-moe-lb-waterfill-dev>, commit
+  `a85e2a43307d436477d096647066cd4899b64f87`, Apache-2.0.
+- Adapted files: `runtime/upstream_tilewf.py`, `runtime/tilewf.cu`.
+  Local modifications are described in the example README; a copy of the
+  source license is in `examples/megamoe/licenses/SGLang-LICENSE`.
+- SGLang patches target commit `232e96a466cbde0f126f47776f378f66a81200b8`
+  of <https://github.com/sgl-project/sglang> (Apache-2.0).
+- FlashInfer compatibility patches target commit
+  `da992ed9919604c5eb6dc255c63f5e89a466452c` of
+  <https://github.com/flashinfer-ai/flashinfer> (Apache-2.0).
+- DeepGEMM is an external runtime dependency supplied by the pinned base image;
+  its source and compiled binaries are not copied into this repository.

@@ -1,0 +1,8 @@
+--- a/sglang/srt/layers/moe/mega_moe_sm90.py
++++ b/sglang/srt/layers/moe/mega_moe_sm90.py
+@@ -97,0 +98,5 @@
++    import os
++    if os.environ.get("EVENMOE_MEGAMOE_PRECISION", "fp8") == "nvfp4":
++        from .v3_loader import build
++        return build(experts)
++

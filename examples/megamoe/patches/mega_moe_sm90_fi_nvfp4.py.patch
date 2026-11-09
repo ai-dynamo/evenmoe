@@ -1,0 +1,9 @@
+--- a/sglang/srt/layers/moe/mega_moe_sm90_fi_nvfp4.py
++++ b/sglang/srt/layers/moe/mega_moe_sm90_fi_nvfp4.py
+@@ -217,2 +217,4 @@
+-        # The kernel always clamps SwiGLU; there is no unclamped variant.
+-        raise ValueError("SM90 NVFP4 MegaMoE needs the model's swiglu_limit")
++        if not getattr(experts, "_mlb_v3_converted", False):
++            raise ValueError("SM90 NVFP4 MegaMoE needs the model's swiglu_limit")
++        activation_clamp = float("inf")
++

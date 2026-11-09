@@ -1,0 +1,14 @@
+--- a/sglang/srt/layers/moe/mega_moe.py
++++ b/sglang/srt/layers/moe/mega_moe.py
+@@ -187 +187 @@
+-        return False
++        raise RuntimeError("Requested MegaMoE weights unavailable; refusing fallback")
+@@ -197 +197,3 @@
+-    return max_tokens_per_rank <= cap
++    if max_tokens_per_rank > cap:
++        raise RuntimeError("Requested MegaMoE token capacity exceeded")
++    return True
+@@ -347,0 +350,3 @@
++    from . import nvfp4_balance_adapter as adapter
++    if adapter.ENABLED:
++        return adapter.forward(moe, hidden_states, forward_batch, input_ids_global, num_tokens)

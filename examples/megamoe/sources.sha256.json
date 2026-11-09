@@ -1,0 +1,17 @@
+{
+  "dependencies.lock.json": "4bf6ca9e7bc54d0a0870d8d447986185ae9e5008d1eb80a4461ae379de1313b3",
+  "licenses/SGLang-LICENSE": "1495e1e757ef4d0925a2350563cf5754bb23c51701a8ec4fb3c5cdcbedae6747",
+  "patches/mega_moe.py.patch": "6e04bb678b704d1acfd5d169e39ce1954ccc1e095ad663b74acbada583f5fb5b",
+  "patches/mega_moe_sm90.py.patch": "ef87ee6fd0509dce9c0cad0105832e0d46693bb8ad661bf079a6c82c725f2c3f",
+  "patches/mega_moe_sm90_fi_nvfp4.py.patch": "3935cb505a674502f3edbb3377f75bb5d91c1e01b089138f646fb008aa44af70",
+  "patches/megamoe_sm90_common.cuh.patch": "eef1502abd0ac2491a87b85d38e3b7b99f3119ef473855c4a7ea454eb9ab7918",
+  "patches/megamoe_sm90_nvfp4_config.jinja.patch": "2b3ae1f75fa86530fb3b1b674b8f5d3d14967201fadb4f424b7e62681d8c6ef4",
+  "patches/megamoe_sm90_nvfp4_split_config.jinja.patch": "5a450036dd5e673d5f1bc16882b09251ffbe767178becd488319a7415953a6ce",
+  "runtime/decode_guard.py": "626701cbc8aed75021dc65af59509b13e54d9cd6db9d08040ecac477fb52fff4",
+  "runtime/nvfp4_balance_adapter.py": "9e73d37becf6585370b15a3a050b115602bdb1d96ea3469445caf7c7b686649e",
+  "runtime/tilewf.cu": "ac557279cbf8b2801a12118801e026face7a47f5ab9f491a8fee94b203044ab9",
+  "runtime/upstream_tilewf.py": "7a3dd1841ac5d3040db3ff276d785a34ce22c5149db1d23a2bbff2834fe991c8",
+  "runtime/v3_loader.py": "063c4897933389129e65a78fef9054d60669dda8427372c5b337d5bb59a2ca04",
+  "runtime/v3_quant.py": "58c9a7ef42c1c331c4b1a54e3c15b79a398a6aa0c7bfa3c3412fbe7ef0117dc2",
+  "runtime/workbuddy_tilewf.py": "73074e2bc85cb2ee302b23a241e0113f6e65e3e7ae50eee7ec3090d9dd830bed"
+}
