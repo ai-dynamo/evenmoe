@@ -1,0 +1,5 @@
+{
+  "precision": "fp8",
+  "policy": "baseline",
+  "twf": false
+}

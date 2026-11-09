@@ -1,0 +1,14 @@
+--- a/sglang/srt/layers/moe/mega_moe_sm90.py
++++ b/sglang/srt/layers/moe/mega_moe_sm90.py
+@@ -95,6 +95,11 @@
+ 
+ 
+ def build_sm90_mega_moe_experts_weights(experts) -> None:
++    import os
++    if os.environ.get("EVENMOE_MEGAMOE_PRECISION", "fp8") == "nvfp4":
++        from .v3_loader import build
++        return build(experts)
++
+     if getattr(experts, "_mega_moe_weights_built", False):
+         return
+ 

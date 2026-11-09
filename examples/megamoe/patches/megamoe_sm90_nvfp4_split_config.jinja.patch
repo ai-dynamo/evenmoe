@@ -1,0 +1,11 @@
+--- a/flashinfer/data/csrc/megamoe/megamoe_sm90_nvfp4_split_config.jinja
++++ b/flashinfer/data/csrc/megamoe/megamoe_sm90_nvfp4_split_config.jinja
+@@ -26,7 +26,7 @@
+ constexpr uint32_t kNumPaddedSFPoolTokens = {{ num_padded_sf_pool_tokens }};
+ constexpr uint32_t kNumSMs                = {{ num_sms }};
+ constexpr uint32_t kNumRanks              = {{ num_ranks }};
+-constexpr float    kActivationClamp       = {{ activation_clamp }}f;
++constexpr float    kActivationClamp       = {% if activation_clamp > 3.402823466e38 %}cute::numeric_limits<float>::infinity(){% else %}{{ activation_clamp }}f{% endif %};
+ constexpr bool     kFastMath              = {{ 'true' if fast_math else 'false' }};
+ 
+ constexpr uint32_t kL1NumStages = {{ l1_num_stages }};

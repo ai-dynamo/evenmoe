@@ -1,0 +1,15 @@
+--- a/sglang/srt/layers/moe/mega_moe_sm90_fi_nvfp4.py
++++ b/sglang/srt/layers/moe/mega_moe_sm90_fi_nvfp4.py
+@@ -214,8 +214,10 @@
+     import flashinfer.megamoe as fm
+ 
+     if activation_clamp is None:
+-        # The kernel always clamps SwiGLU; there is no unclamped variant.
+-        raise ValueError("SM90 NVFP4 MegaMoE needs the model's swiglu_limit")
++        if not getattr(experts, "_mlb_v3_converted", False):
++            raise ValueError("SM90 NVFP4 MegaMoE needs the model's swiglu_limit")
++        activation_clamp = float("inf")
++
+     buf = _get_fi_symm_buffer(
+         ep_group,
+         num_experts=experts.num_experts,

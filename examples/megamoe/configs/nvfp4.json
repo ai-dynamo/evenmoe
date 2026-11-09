@@ -1,0 +1,5 @@
+{
+  "precision": "nvfp4",
+  "policy": "baseline",
+  "twf": false
+}
