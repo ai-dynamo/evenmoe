@@ -1,32 +1,14 @@
 --- a/sglang/srt/layers/moe/mega_moe.py
 +++ b/sglang/srt/layers/moe/mega_moe.py
-@@ -184,7 +184,7 @@
-     if not get_moe_a2a_backend().is_megamoe():
-         return False
-     if not is_mega_moe_experts_ready(moe.experts):
+@@ -187 +187 @@
 -        return False
 +        raise RuntimeError("Requested MegaMoE weights unavailable; refusing fallback")
-     if get_is_capture_mode():
-         return True
- 
-@@ -194,7 +194,9 @@
-     else:
-         max_tokens_per_rank = hidden_states.shape[0]
-     cap = envs.SGLANG_OPT_DEEPGEMM_MEGA_MOE_NUM_MAX_TOKENS_PER_RANK.get()
+@@ -197 +197,3 @@
 -    return max_tokens_per_rank <= cap
 +    if max_tokens_per_rank > cap:
 +        raise RuntimeError("Requested MegaMoE token capacity exceeded")
 +    return True
- 
- 
- def should_fuse_mega_moe_shared_experts(moe: DeepseekV2MoE) -> bool:
-@@ -345,6 +347,9 @@
-     input_ids_global: Optional[torch.Tensor],
-     num_tokens: int,
- ) -> torch.Tensor:
+@@ -347,0 +350,3 @@
 +    from . import nvfp4_balance_adapter as adapter
 +    if adapter.ENABLED:
 +        return adapter.forward(moe, hidden_states, forward_batch, input_ids_global, num_tokens)
-     hidden_size = moe.config.hidden_size
- 
-     routing = None

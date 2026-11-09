@@ -1,11 +1,6 @@
 --- a/flashinfer/data/csrc/megamoe/megamoe_sm90_common.cuh
 +++ b/flashinfer/data/csrc/megamoe/megamoe_sm90_common.cuh
-@@ -1,5 +1,8 @@
- // Host utilities shared by all SM90 FP4 MegaMoE launchers and bindings.
- #pragma once
+@@ -2,0 +3,3 @@
 +#include <limits>
 +// NVCC host stubs refer to the infinity template value as inf.
 +inline constexpr float inf = std::numeric_limits<float>::infinity();
- 
- #include <cuda.h>
- #include <cuda_runtime.h>
