@@ -8,7 +8,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from evenmoe.adapters.sglang import placement as placement_adapter
-from evenmoe.core.policy import A2A_DEEPEP, A2A_MEGAMOE, RoutingCapabilities
+from evenmoe.core.policy import (
+    A2A_DEEPEP,
+    A2A_MEGAMOE,
+    ExpertDeploymentConfig,
+    RoutingCapabilities,
+)
 from evenmoe.core.types import (
     PlacementSnapshot,
     RoutingDecision,
@@ -67,6 +72,30 @@ class _SGLangCollectives:
 
     def all_reduce_sum(self, payload):
         return self.context.parallel.moe_ep_group.all_reduce(payload)
+
+
+def to_deployment_config(
+    context: RuntimeContext, *, routes_shared_expert: bool
+) -> ExpertDeploymentConfig:
+    """What SGLang knows about the deployment, for ``RoutingPipeline.is_applicable``.
+
+    ``routes_shared_expert`` is SGLang's shared-expert fusion decision, which
+    the context does not hold. Placement metadata is carried: this adapter
+    threads ``PlacementPlan.metadata`` into the committed snapshot. The EP size
+    and expert count let a policy such as ``ultraep`` report its layout
+    preconditions while SGLang reads its configuration.
+    """
+
+    model_info = context.resources.mlb_model_info
+    return ExpertDeploymentConfig(
+        num_redundant_experts=context.config_bag("exec").moe.ep_num_redundant_experts,
+        routes_shared_expert=routes_shared_expert,
+        carries_placement_metadata=True,
+        ep_size=context.parallel.ep_size,
+        num_logical_experts=(
+            None if model_info is None else int(model_info["num_logical_experts"])
+        ),
+    )
 
 
 def to_load_balancer_kwargs(context: RuntimeContext) -> dict:
