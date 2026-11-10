@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 
-from evenmoe.core.l1 import PlacementPlanner
+from evenmoe.core.l1 import InitialPlacementPlanner, PlacementPlanner
 from evenmoe.core.l2 import (
     GlobalLogicalCountConsumer,
     RoutingCollectives,
@@ -24,6 +24,7 @@ from evenmoe.core.types import (
     PlacementPolicyConfig,
     PlacementRequest,
     PlacementSnapshot,
+    PlacementTopology,
     RoutingDecision,
     RoutingPhase,
     RoutingPolicyConfig,
@@ -243,14 +244,97 @@ class MoELoadBalancer:
                 "Placement policy is disabled. The framework must skip the "
                 "plan_placement call when it decides not to rebalance."
             )
+        planner = self._placement_planner(policy.name)
+        return planner.plan(replace(request, policy=policy))
+
+    def plan_initial_placement(
+        self,
+        topology: PlacementTopology,
+        *,
+        num_logical_experts: int,
+        num_layers: int,
+    ) -> PlacementPlan | None:
+        """The configured L1 policy's placement before any statistics exist.
+
+        None when no placement policy is configured or the policy has no
+        layout of its own; the framework then keeps its default initial
+        placement. The returned plan is uncommitted, exactly like
+        :meth:`plan_placement`'s.
+        """
+
+        if self._configured_placement_policy.is_disabled:
+            return None
+        planner = self._placement_planner(self._configured_placement_policy.name)
+        if not isinstance(planner, InitialPlacementPlanner):
+            return None
+        return planner.initial_plan(
+            topology, num_logical_experts=num_logical_experts, num_layers=num_layers
+        )
+
+    def requires_per_source_rank_statistics(self, placement_policy: str | None = None) -> bool:
+        """Whether an L1 policy solves from each source EP rank's own counts.
+
+        When True the framework keeps the rank dimension while it aggregates
+        recorded statistics and passes ``[ranks, layers, logical_experts]``;
+        otherwise it may sum over ranks. ``placement_policy`` defaults to the
+        configured one, so a framework that selects its L1 policy separately
+        from the routing pipeline (vLLM) can ask about the policy it will run.
+        False when no placement policy is configured.
+        """
+
+        if placement_policy is None:
+            if self._configured_placement_policy.is_disabled:
+                return False
+            placement_policy = self._configured_placement_policy.name
+        planner = self._placement_planner(placement_policy)
+        return bool(getattr(planner, "requires_per_source_rank_statistics", False))
+
+    def aggregate_logical_count(
+        self,
+        local_count: object,
+        *,
+        ep_size: int,
+        placement_policy: str | None = None,
+    ) -> object:
+        """Combine this rank's ``[layers, logical_experts]`` counts over the EP group.
+
+        Returns ``PlacementStats.logical_count`` for ``placement_policy`` (the
+        configured one by default): ``[ep_size, layers, logical_experts]`` with
+        one row per source rank when
+        :meth:`requires_per_source_rank_statistics` holds, otherwise the
+        ``[1, layers, logical_experts]`` EP-wide sum. Runs one AllReduce
+        through the injected :class:`RoutingCollectives`, so every EP rank
+        must call it together. The payload is 1-D: a framework all-reduce may
+        pick its kernel by shape and treat a 2-D tensor as activations.
+        """
+
+        import torch
+
+        if not isinstance(local_count, torch.Tensor) or local_count.dim() != 2:
+            raise ValueError("local_count must be a [layers, logical_experts] tensor.")
+        if not self.requires_per_source_rank_statistics(placement_policy):
+            reduced = self._all_reduce_sum(local_count.reshape(-1), ep_size)
+            if not isinstance(reduced, torch.Tensor):
+                raise TypeError("Logical-count AllReduce must return a torch.Tensor.")
+            return reduced.view(1, *local_count.shape)
+        rank = 0 if ep_size == 1 and self._collectives is None else self._collective_rank()
+        if not 0 <= rank < ep_size:
+            raise ValueError("Collective rank is outside the EP group.")
+        payload = local_count.new_zeros(ep_size * local_count.numel())
+        payload.view(ep_size, -1)[rank] = local_count.reshape(-1)
+        reduced = self._all_reduce_sum(payload, ep_size)
+        if not isinstance(reduced, torch.Tensor):
+            raise TypeError("Logical-count AllReduce must return a torch.Tensor.")
+        return reduced.view(ep_size, *local_count.shape)
+
+    def _placement_planner(self, name: str) -> PlacementPlanner:
         try:
-            planner = self._placement_planners[policy.name]
+            return self._placement_planners[name]
         except KeyError as exc:
             raise ValueError(
-                f"Unknown placement policy {policy.name!r}; registered "
+                f"Unknown placement policy {name!r}; registered "
                 f"policies are {sorted(self._placement_planners)}."
             ) from exc
-        return planner.plan(replace(request, policy=policy))
 
     def transform_topk_inputs(
         self,
@@ -475,12 +559,12 @@ class MoELoadBalancer:
             return payload
         if self._collectives is None:
             raise RuntimeError(
-                "The configured EvenMoE routing pipeline requires EP AllReduce, but no "
-                "RoutingCollectives adapter was provided."
+                "This EvenMoE call needs an EP AllReduce, but no RoutingCollectives "
+                "adapter was provided."
             )
         if self._collectives.world_size != expected_world_size:
             raise ValueError(
-                "RoutingCollectives.world_size does not match the committed placement."
+                "RoutingCollectives.world_size does not match the EP size."
             )
         return self._collectives.all_reduce_sum(payload)
 

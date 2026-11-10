@@ -184,6 +184,13 @@ Implement the new placement logic in this method and return these fields:
 | `logical_to_all_physical_map` | Candidate physical slots for each logical expert; use `-1` for padding |
 | `logical_to_physical_count` | The number of valid physical replicas for each logical expert |
 
+Two optional declarations let the framework ask the policy instead of special-casing it; see [UltraEPPlacementPolicy](src/evenmoe/policies/l1/ultraep.py):
+
+| Declaration | When to add it | Framework entry point |
+|---|---|---|
+| Class attribute `requires_per_source_rank_statistics = True` | `plan()` solves from each source EP rank's own counts, so `request.stats.logical_count` is `[ranks, layers, logical_experts]` rather than summed over ranks | `MoELoadBalancer.requires_per_source_rank_statistics()` and `aggregate_logical_count()` |
+| Method `initial_plan(topology, *, num_logical_experts, num_layers)` (`InitialPlacementPlanner`) | The policy has its own placement before any statistics exist | `MoELoadBalancer.plan_initial_placement()`, which returns `None` for a policy without it |
+
 **Step 2: Follow Section 6.4 to add the algorithm to EvenMoE's default planner mapping.**
 
 The framework selects a built-in algorithm through `PlacementRequest.policy`.
@@ -288,7 +295,7 @@ Complete the relevant integration below so the framework can select the new L1 o
 | Goal | File and location | What to add |
 |---|---|---|
 | Select L1 by name | `core/orchestrator.py` → `MoELoadBalancer.__init__()` | Import the new planner and add its name-to-instance mapping to the default `placement_planners`; use this name in `PlacementRequest.policy` |
-| Parse the L2 name and runtime requirements | `core/routing_pipeline.py` → `RoutingPipeline._from_string()`; update `is_applicable()` as needed | Recognize the new name, assign it to the correct execution phase, and declare the statistics, state, and runtime conditions it requires |
+| Parse the L2 name and runtime requirements | `core/routing_pipeline.py` → `RoutingPipeline._from_string()`; update `is_applicable()` as needed | Recognize the new name, assign it to the correct execution phase, and declare the statistics, state, and runtime conditions it requires in its `RoutingPolicySpec`; an L1 policy declares its own statistics needs (Section 6.2) |
 | Create the implementation from the L2 name | `core/orchestrator.py` → `MoELoadBalancer.from_algorithm()` | Import the new router; instantiate it when its name is selected and add it to `routers`, so the factory returns a configured EvenMoE instance |
 
 ## 7. Compare against a baseline and report performance
