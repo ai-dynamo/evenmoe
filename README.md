@@ -52,6 +52,34 @@ Support below refers to EvenMoE's `main`-branch adapters; serving requires the c
 
 Compose L2 policies with `+`, for example `lplb+waterfill` or `ultraep+waterfill`, subject to the framework support above.
 
+### Waterfill options
+
+Waterfill picks one EP rank per token for its shared-expert row. Two independent options shape the choice; the defaults suit most deployments and need no configuration.
+
+| Option | Values | Default | Meaning |
+|:---|:---|:---|:---|
+| `load_view` | `local` / `global` | `local` | `local` balances against this rank's own routed load, with no collective. `global` all-reduces every rank's routed load and token count once per MoE layer (2 × EP int64 values). |
+| `candidates` | `routed` / `all` | `routed` | `routed` keeps the shared row on the source rank or a rank the token's routed experts already go to, so it adds no new dispatch destination. `all` allows any rank. |
+
+Consider `load_view=global` for prefill-only instances on DeepEP, where it measured slightly higher throughput; keep the default for decode, where the per-layer all-reduce lengthens small-batch TPOT. Global falls back to `local`, keeping `candidates`, and logs one warning when its collective cannot run safely: after LPLB, when the framework passes no `collectives` and EP > 1, when no committed placement is available, and on the MegaMoE A2A backend.
+
+Both are policy configuration:
+
+```python
+from evenmoe import MoELoadBalancer, RoutingPipeline, RoutingPolicyConfig
+
+waterfill = RoutingPolicyConfig(
+    name="waterfill", metadata={"load_view": "global", "candidates": "routed"}
+)
+mlb = MoELoadBalancer.from_algorithm(
+    RoutingPipeline.from_value(["dynamic", waterfill]),
+    ep_size=8, source_rank=rank, experts_per_rank=36, collectives=collectives,
+)
+# or per call: RoutingRequest(..., policies=("dynamic", waterfill))
+```
+
+The SGLang and vLLM selectors (`--moe-load-balancer-algorithm`, `VLLM_EVENMOE_L2_ALGORITHM`) pass only the algorithm name, so they run the defaults. For experiments only, `WATERFILL_LOAD_VIEW=local|global` and `WATERFILL_CANDIDATES=routed|all` override the defaults in every process; options set in `metadata` still win. Normal use does not need them.
+
 ¹ METRO acts on decode steps and needs the vLLM integration's METRO decode-routing fixes. In vLLM it helps only at small decode batches: on DeepSeek-V3 EP8 (H20) with 64 redundant experts it lowered TPOT by 4.4% at 1 request per rank and raised it from 16 requests per rank. See [vLLM](#vllm).
 
 ## Performance
@@ -71,6 +99,8 @@ Placement is recorded once per dataset. **Same-domain** serves the dataset its p
 | UltraEP + Waterfill | 20.9K (+16.6%) | 21.0K (+11.2%) | 20.9K (+16.6%) | 21.0K (+11.2%) |
 
 Each workload used 1,000 prompts with ~1K-token inputs, concurrency 256, and `max_tokens=1` (prefill-only); values are the median of three measured rounds.
+
+The Waterfill rows were measured with `candidates=all`, the default before `routed`. In a later run of the same setup (DeepSeek-V3, three rounds, change versus EPLB), `local`+`routed` measured −0.39% / −0.32% same-domain and +3.93% / +3.18% cross-domain (GSM8K / MMLU), against −0.7% / −0.6% and +4.0% / +3.2% for `local`+`all` and +0.35% / +0.12% and +4.30% / +3.86% for `global`+`routed`.
 
 ## Quick Start
 

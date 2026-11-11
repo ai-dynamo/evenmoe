@@ -13,7 +13,17 @@ from evenmoe import (
     RoutingPhase,
     RoutingPipeline,
 )
+from evenmoe.core import policy as policy_module
 from evenmoe.core.policy import PolicyRegistry, RoutingPolicySpec
+from evenmoe.core.types import RoutingPolicyConfig
+
+
+@pytest.fixture(autouse=True)
+def _waterfill_defaults(monkeypatch):
+    """Run every test under Waterfill's defaults, with fresh one-time warnings."""
+    for name in ("WATERFILL_LOAD_VIEW", "WATERFILL_CANDIDATES"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(policy_module, "_reported_fallbacks", set())
 
 
 def _placement() -> PlacementSnapshot:
@@ -249,22 +259,155 @@ def test_lplb_local_count_mode_is_declared_by_the_policy(monkeypatch):
     assert pipeline.steps[0].spec.logical_count == "local"
 
 
+def _waterfill_spec(pipeline: RoutingPipeline) -> RoutingPolicySpec:
+    spec = pipeline.spec_for("waterfill")
+    assert spec is not None
+    return spec
+
+
+def _options(config=None):
+    from evenmoe.policies.l2.waterfill import waterfill_option
+
+    return waterfill_option(config, "load_view"), waterfill_option(config, "candidates")
+
+
 @pytest.mark.unit
-def test_waterfill_global_load_mode_is_declared_by_the_policy(monkeypatch):
-    monkeypatch.setenv("WATERFILL_USE_GLOBAL_LOAD", "1")
+@pytest.mark.parametrize(
+    "algorithm", ["waterfill", "dynamic+waterfill", "lplb+waterfill", "ultraep+waterfill"]
+)
+def test_waterfill_defaults_to_local_view_with_routed_candidates(algorithm, caplog):
+    with caplog.at_level("WARNING", logger="evenmoe"):
+        waterfill = _waterfill_spec(RoutingPipeline.from_value(algorithm))
 
-    pipeline = RoutingPipeline.from_value("waterfill")
-    waterfill = pipeline.steps[1]
-
-    assert waterfill.spec.rank_load == "global"
+    assert waterfill.rank_load == "local"
+    assert not waterfill.reads_global_view
+    assert _options() == ("local", "routed")
+    assert not caplog.records
 
 
 @pytest.mark.unit
-def test_global_waterfill_rejects_lplb_until_collectives_are_uniform(monkeypatch):
-    monkeypatch.setenv("WATERFILL_USE_GLOBAL_LOAD", "1")
+@pytest.mark.parametrize("load_view", ["local", "global"])
+@pytest.mark.parametrize("candidates", ["routed", "all"])
+def test_waterfill_options_are_independent(monkeypatch, load_view, candidates):
+    config = RoutingPolicyConfig(
+        name="waterfill", metadata={"load_view": load_view, "candidates": candidates}
+    )
 
-    with pytest.raises(ValueError, match="waterfill cannot be combined with.*lplb"):
-        RoutingPipeline.from_value("lplb+waterfill")
+    waterfill = _waterfill_spec(RoutingPipeline.from_value([config]))
+
+    assert waterfill.rank_load == load_view
+    assert _options(config) == (load_view, candidates)
+
+
+@pytest.mark.unit
+def test_waterfill_config_options_override_the_environment(monkeypatch):
+    monkeypatch.setenv("WATERFILL_LOAD_VIEW", "global")
+    monkeypatch.setenv("WATERFILL_CANDIDATES", "all")
+    config = RoutingPolicyConfig(
+        name="waterfill", metadata={"load_view": "local", "candidates": "routed"}
+    )
+
+    assert _options(config) == ("local", "routed")
+    pipeline = RoutingPipeline.from_value([config])
+    assert _waterfill_spec(pipeline).rank_load == "local"
+    assert _options(RoutingPolicyConfig(name="waterfill")) == ("global", "all")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("env", "value", "match"),
+    [
+        ("WATERFILL_LOAD_VIEW", "auto", "WATERFILL_LOAD_VIEW='auto'"),
+        ("WATERFILL_CANDIDATES", "some", "WATERFILL_CANDIDATES='some'"),
+    ],
+)
+def test_waterfill_rejects_unknown_option_values(monkeypatch, env, value, match):
+    monkeypatch.setenv(env, value)
+    with pytest.raises(ValueError, match=match):
+        _options()
+
+
+@pytest.mark.unit
+def test_waterfill_rejects_an_unknown_config_option_value():
+    with pytest.raises(ValueError, match="load_view"):
+        RoutingPipeline.from_value(
+            [RoutingPolicyConfig(name="waterfill", metadata={"load_view": "sometimes"})]
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("algorithm", ["lplb+waterfill", "lp+waterfill", "fake+lplb+waterfill"])
+@pytest.mark.parametrize("candidates", ["routed", "all"])
+def test_global_waterfill_falls_back_to_local_after_lplb_with_one_warning(
+    monkeypatch, caplog, algorithm, candidates
+):
+    monkeypatch.setenv("WATERFILL_LOAD_VIEW", "global")
+    monkeypatch.setenv("WATERFILL_CANDIDATES", candidates)
+
+    with caplog.at_level("WARNING", logger="evenmoe"):
+        for _ in range(3):
+            waterfill = _waterfill_spec(RoutingPipeline.from_value(algorithm))
+            assert waterfill.rank_load == "local"
+
+    # The fallback changes the load view only.
+    assert _options()[1] == candidates
+    warnings = [record.getMessage() for record in caplog.records]
+    assert len(warnings) == 1
+    assert "waterfill falls back (rank_load 'global' -> 'local')" in warnings[0]
+    assert "lplb" in warnings[0]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("algorithm", ["waterfill", "dynamic+waterfill", "ultraep+waterfill"])
+def test_global_waterfill_keeps_the_global_view_without_lplb(monkeypatch, caplog, algorithm):
+    monkeypatch.setenv("WATERFILL_LOAD_VIEW", "global")
+
+    with caplog.at_level("WARNING", logger="evenmoe"):
+        waterfill = _waterfill_spec(RoutingPipeline.from_value(algorithm))
+
+    assert waterfill.rank_load == "global"
+    assert waterfill.fallback is not None
+    assert waterfill.fallback.rank_load == "local"
+    assert not caplog.records
+
+
+@pytest.mark.unit
+def test_conflict_fallback_is_generic_and_errors_without_one():
+    """A conflicting policy is swapped for its declared fallback, never by name."""
+    local = RoutingPolicySpec("shared", RoutingPhase.SHARED_EXPERT, rank_load="local")
+    eager = RoutingPolicySpec(
+        "shared",
+        RoutingPhase.SHARED_EXPERT,
+        rank_load="global",
+        incompatible_with=frozenset({"static"}),
+        fallback=local,
+    )
+    static = RoutingPipeline.from_value("static").steps[0].spec
+
+    def registry(shared):
+        return PolicyRegistry(
+            physical_routers={"static": static},
+            shared_expert_routers={"shared": shared},
+            default_physical_router="static",
+        )
+
+    pipeline = RoutingPipeline.from_value("shared", registry=registry(eager))
+    assert pipeline.spec_for("shared") is local
+
+    strict = RoutingPolicySpec(
+        "shared",
+        RoutingPhase.SHARED_EXPERT,
+        rank_load="global",
+        incompatible_with=frozenset({"static"}),
+    )
+    with pytest.raises(ValueError, match="shared cannot be combined with"):
+        RoutingPipeline.from_value("shared", registry=registry(strict))
+    with pytest.raises(ValueError, match="same policy"):
+        RoutingPolicySpec(
+            "other",
+            RoutingPhase.SHARED_EXPERT,
+            fallback=local,
+        )
 
 
 @pytest.mark.unit

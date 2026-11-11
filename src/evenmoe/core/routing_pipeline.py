@@ -47,12 +47,7 @@ class RoutingPipeline:
             )
 
         names = {step.spec.name for step in steps}
-        for step in steps:
-            conflicts = step.spec.incompatible_with & names
-            if conflicts:
-                raise ValueError(
-                    f"{step.spec.name} cannot be combined with {sorted(conflicts)}."
-                )
+        steps = tuple(_without_conflicts(step, names) for step in steps)
         required_l1 = {step.spec.required_placement for step in steps} - {None}
         if len(required_l1) > 1:
             raise ValueError("Routing policies require incompatible L1 placement policies.")
@@ -205,6 +200,20 @@ class RoutingPipeline:
                 steps.append(_RoutingStep(default.resolve(config), config, implicit=True))
 
         return cls(steps=tuple(steps), input_transform=transform)
+
+
+def _without_conflicts(step: _RoutingStep, names: set[str]) -> _RoutingStep:
+    """The step itself, or its declared fallback when it conflicts with ``names``."""
+
+    conflicts = step.spec.incompatible_with & names
+    if not conflicts:
+        return step
+    fallback = step.spec.fallback
+    if fallback is None or fallback.incompatible_with & names:
+        raise ValueError(f"{step.spec.name} cannot be combined with {sorted(conflicts)}.")
+    return replace(
+        step, spec=step.spec.fall_back(f"it is combined with {', '.join(sorted(conflicts))}")
+    )
 
 
 def _merge_capabilities(steps: Sequence[_RoutingStep]) -> RoutingCapabilities:

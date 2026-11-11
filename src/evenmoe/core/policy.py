@@ -11,12 +11,15 @@ declarations.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 
 from evenmoe.core.l1 import PlacementPlanner
 from evenmoe.core.l2 import TokenRouter
 from evenmoe.core.types import RoutingPhase, RoutingPolicyConfig, TensorLike
+
+logger = logging.getLogger(__name__)
 
 _DATA_VIEWS = (None, "local", "global")
 
@@ -25,6 +28,11 @@ A2A_MEGAMOE = "megamoe"
 """EvenMoE's names for A2A dispatch backends, as ``supported_a2a_backends`` uses
 them. They are not framework flag values: each framework adapter translates its
 own backend names (``a2a_backend_from_sglang``, ``a2a_backend_from_vllm``)."""
+A2A_BACKENDS_WITHOUT_LOCKSTEP_ROUTING = frozenset({A2A_MEGAMOE})
+"""Backends on which a framework may skip routing on an EP rank that holds no
+tokens (SGLang's MegaMoE path skips TopK on such DP-attention ranks). A
+per-layer routing collective can hang there, so a policy that can do without
+one (it declares a ``fallback``) does."""
 _GRAPH_STABILITIES = ("stable", "realloc_on_placement_change")
 
 
@@ -148,11 +156,24 @@ class RoutingPolicySpec:
     requires_placement_metadata: bool = False
     required_placement: str | None = None
     incompatible_with: frozenset[str] = frozenset()
+    fallback: RoutingPolicySpec | None = None
+    """The declaration to run instead when this one cannot run: it is combined
+    with a policy in ``incompatible_with``, or it reads an EP-wide view that
+    the deployment cannot gather (see :attr:`reads_global_view`). Without a
+    fallback those cases are errors. Each switch is logged once."""
     configure: Callable[[RoutingPolicyConfig], RoutingPolicySpec] | None = None
     build_router: Callable[[RouterBuildContext], TokenRouter] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "incompatible_with", frozenset(self.incompatible_with))
+        if self.fallback is not None and (
+            self.fallback.name != self.name
+            or self.fallback.phase is not self.phase
+            or self.fallback.configure is not None
+        ):
+            raise ValueError(
+                "A fallback must be an already-resolved declaration of the same policy."
+            )
         if self.supported_a2a_backends is not None:
             if isinstance(self.supported_a2a_backends, str):
                 raise ValueError("supported_a2a_backends must be a tuple of names, not a str.")
@@ -168,6 +189,33 @@ class RoutingPolicySpec:
             raise ValueError("Only a shared-expert policy may consume rank load.")
         if self.graph_stability not in _GRAPH_STABILITIES:
             raise ValueError("Unknown graph_stability value.")
+
+    @property
+    def reads_global_view(self) -> bool:
+        """Whether routing gathers an EP-wide view with a collective."""
+
+        return self.logical_count == "global" or self.rank_load == "global"
+
+    def fall_back(self, reason: str) -> RoutingPolicySpec:
+        """Return :attr:`fallback`, logging once per policy and reason why."""
+
+        if self.fallback is None:
+            raise ValueError(f"{self.name} declares no fallback.")
+        key = (self.name, reason)
+        if key not in _reported_fallbacks:
+            _reported_fallbacks.add(key)
+            changed = ", ".join(
+                f"{view} {getattr(self, view)!r} -> {getattr(self.fallback, view)!r}"
+                for view in ("logical_count", "rank_load")
+                if getattr(self, view) != getattr(self.fallback, view)
+            )
+            logger.warning(
+                "EvenMoE %s falls back (%s) because %s.",
+                self.name,
+                changed or "declaration",
+                reason,
+            )
+        return self.fallback
 
     def resolve(self, config: RoutingPolicyConfig) -> RoutingPolicySpec:
         """Return the declaration that applies to one concrete selection."""
@@ -189,6 +237,11 @@ class RoutingPolicySpec:
         if self.phase is RoutingPhase.SHARED_EXPERT and not deployment.routes_shared_expert:
             return f"{self.name} requires the runtime to dispatch the shared expert"
         return None
+
+
+_reported_fallbacks: set[tuple[str, str]] = set()
+"""Fallbacks already logged. Frameworks re-parse the same selection many
+times (SGLang does so per server-argument hook and per TopK module)."""
 
 
 InputTransform = Callable[

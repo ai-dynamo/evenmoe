@@ -13,6 +13,7 @@ from evenmoe.core.l2 import (
     TokenRouter,
 )
 from evenmoe.core.policy import (
+    A2A_BACKENDS_WITHOUT_LOCKSTEP_ROUTING,
     PolicyRegistry,
     RouterBuildContext,
     RoutingCapabilities,
@@ -41,6 +42,11 @@ class MoELoadBalancer:
     at construction. A non-disabled ``PlacementRequest.policy`` or a non-empty
     ``RoutingRequest.policies`` overrides the corresponding default for one
     call.
+
+    ``a2a_backend`` is the EvenMoE name of the framework's dispatch backend
+    (``A2A_DEEPEP``, ...), or None when unknown. It is only used to decide
+    whether a per-layer routing collective is safe; see
+    ``A2A_BACKENDS_WITHOUT_LOCKSTEP_ROUTING``.
     """
 
     def __init__(
@@ -53,6 +59,7 @@ class MoELoadBalancer:
         routing_pipeline: RoutingPipeline | str | None = None,
         collectives: RoutingCollectives | None = None,
         registry: PolicyRegistry | None = None,
+        a2a_backend: str | None = None,
     ) -> None:
         if registry is None:
             from evenmoe.policies.registry import builtin_registry
@@ -92,6 +99,7 @@ class MoELoadBalancer:
         # RoutingRequest.policies against the configured L1 policy.
         self._configured_placement_policy = configured_placement
         self._collectives = collectives
+        self._a2a_backend = a2a_backend
 
     @classmethod
     def from_algorithm(
@@ -103,6 +111,7 @@ class MoELoadBalancer:
         experts_per_rank: int,
         collectives: RoutingCollectives | None = None,
         registry: PolicyRegistry | None = None,
+        a2a_backend: str | None = None,
         **options: object,
     ) -> MoELoadBalancer:
         """Build the routers one algorithm expression selects.
@@ -132,6 +141,7 @@ class MoELoadBalancer:
             routing_pipeline=pipeline,
             collectives=collectives,
             registry=registry,
+            a2a_backend=a2a_backend,
         )
 
     @property
@@ -150,20 +160,58 @@ class MoELoadBalancer:
             return None
         return self._configured_placement_policy.name
 
-    def _policy_spec(self, config: RoutingPolicyConfig) -> RoutingPolicySpec | None:
+    def _policy_spec(
+        self, config: RoutingPolicyConfig, *, override: bool = False
+    ) -> RoutingPolicySpec | None:
         """The declaration for one executing L2 policy, if it has one.
 
-        The configured pipeline already resolved its specs; request-time
-        overrides fall back to the registry. A router registered under a name
+        The configured pipeline already resolved its specs. A request-time
+        override (``override``) resolves its own config through the registry,
+        so options in its ``metadata`` apply. A router registered under a name
         with no declaration (test doubles, out-of-tree experiments) gets
         ``None`` and the default data views.
         """
 
-        spec = self._routing_pipeline.spec_for(config.name)
+        spec = None if override else self._routing_pipeline.spec_for(config.name)
         if spec is not None:
             return spec
         spec = self._registry.lookup(config.name)
         return None if spec is None else spec.resolve(config)
+
+    def _executing_spec(
+        self,
+        config: RoutingPolicyConfig,
+        request: RoutingRequest,
+        selected: frozenset[str],
+    ) -> RoutingPolicySpec | None:
+        """The declaration one policy runs with for this request.
+
+        That is :meth:`_policy_spec`, or its declared fallback when this
+        request cannot satisfy it. ``selected`` names a request-time
+        override's policies, whose combination the configured pipeline has
+        not checked.
+        """
+
+        spec = self._policy_spec(config, override=bool(selected))
+        if spec is None or spec.fallback is None:
+            return spec
+        conflicts = spec.incompatible_with & selected
+        if conflicts:
+            return spec.fall_back(f"it is combined with {', '.join(sorted(conflicts))}")
+        if not spec.reads_global_view:
+            return spec
+        if self._a2a_backend in A2A_BACKENDS_WITHOUT_LOCKSTEP_ROUTING:
+            return spec.fall_back(
+                f"the {self._a2a_backend} A2A backend may skip routing on EP ranks "
+                "without tokens, so a per-layer collective could hang"
+            )
+        if request.placement is None:
+            return spec.fall_back("the routing request has no committed PlacementSnapshot")
+        if self._collectives is None and request.placement.ep_size > 1:
+            return spec.fall_back(
+                f"no RoutingCollectives adapter was provided for EP size {request.placement.ep_size}"
+            )
+        return spec
 
     def on_placement_committed(self, placement: PlacementSnapshot) -> None:
         """Notify active policies that a framework placement was committed.
@@ -282,6 +330,9 @@ class MoELoadBalancer:
         skipped: list[str] = []
 
         policy_values = request.policies or self._routing_pipeline.post_topk_policies
+        selected = frozenset(
+            RoutingPolicyConfig.from_value(value).name for value in request.policies
+        )
         for policy_value in policy_values:
             policy_config = RoutingPolicyConfig.from_value(policy_value)
             if not policy_config.should_run_for_stage(request.stage):
@@ -308,7 +359,7 @@ class MoELoadBalancer:
                     routed_rank_load=None,
                     active_rank_token_count=None,
                     global_logical_count=self._resolve_global_logical_count(
-                        router, request, policy_config
+                        router, request, policy_config, selected
                     ),
                 )
                 decision = router.route_tokens(policy_request, policy_config)
@@ -332,7 +383,7 @@ class MoELoadBalancer:
                     policy_config,
                 )
 
-                spec = self._policy_spec(policy_config)
+                spec = self._executing_spec(policy_config, request, selected)
                 if spec is not None and spec.rank_load == "global":
                     routed_rank_load, active_rank_token_count = self._global_rank_load(
                         routed_rank_load, request
@@ -383,6 +434,7 @@ class MoELoadBalancer:
         router: TokenRouter,
         request: RoutingRequest,
         policy: RoutingPolicyConfig,
+        selected: frozenset[str],
     ) -> object:
         """Gather the EP-wide per-logical token count, but only if it is used.
 
@@ -409,7 +461,7 @@ class MoELoadBalancer:
             return None
         if not router.needs_global_logical_count(request):
             return None
-        spec = self._policy_spec(policy)
+        spec = self._executing_spec(policy, request, selected)
         use_local_count = spec is not None and spec.logical_count == "local"
         return self._logical_count(request, use_local_count=use_local_count)
 

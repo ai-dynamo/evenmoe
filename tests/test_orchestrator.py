@@ -21,7 +21,19 @@ from evenmoe import (
     RoutingRequest,
     RoutingStage,
 )
+from evenmoe.core import policy as policy_module
+from evenmoe.core.policy import A2A_DEEPEP, A2A_MEGAMOE
 from evenmoe.kernels.ops.counting import count_routed_per_rank
+
+_GLOBAL_WATERFILL = RoutingPolicyConfig(name="waterfill", metadata={"load_view": "global"})
+
+
+@pytest.fixture(autouse=True)
+def _waterfill_defaults(monkeypatch):
+    """Run every test under Waterfill's defaults, with fresh fallback logs."""
+    for name in ("WATERFILL_LOAD_VIEW", "WATERFILL_CANDIDATES"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(policy_module, "_reported_fallbacks", set())
 
 
 def _placement() -> PlacementSnapshot:
@@ -286,8 +298,7 @@ def test_default_rank_counter_resolves_routing_metadata(rank_map_kind):
 
 
 @pytest.mark.unit
-def test_global_waterfill_packs_rank_and_active_load_into_one_collective(monkeypatch):
-    monkeypatch.setenv("WATERFILL_USE_GLOBAL_LOAD", "1")
+def test_global_waterfill_packs_rank_and_active_load_into_one_collective():
     calls = []
     shared = _SharedRouter(calls)
     collectives = _RecordingCollectives(torch.tensor([1, 1, 0, 3]))
@@ -305,10 +316,7 @@ def test_global_waterfill_packs_rank_and_active_load_into_one_collective(monkeyp
         topk_weights=torch.ones((2, 2)),
         placement=_placement(),
         token_count=2,
-        policies=(
-            RoutingPolicyConfig(name="dynamic"),
-            RoutingPolicyConfig(name="waterfill"),
-        ),
+        policies=(RoutingPolicyConfig(name="dynamic"), _GLOBAL_WATERFILL),
     )
 
     mlb.route_tokens(request)
@@ -320,13 +328,12 @@ def test_global_waterfill_packs_rank_and_active_load_into_one_collective(monkeyp
 
 
 @pytest.mark.unit
-def test_global_rank_load_follows_the_policy_declaration_not_its_name(monkeypatch):
+def test_global_rank_load_follows_the_policy_declaration_not_its_name():
     """The orchestrator issues the rank-load collective for whichever policy
     declares ``rank_load="global"``; it never keys off the policy's name."""
     from evenmoe.core.policy import PolicyRegistry, RoutingPolicySpec
     from evenmoe.policies.registry import builtin_registry
 
-    monkeypatch.delenv("WATERFILL_USE_GLOBAL_LOAD", raising=False)
     calls = []
     shared = _SharedRouter(calls)
     collectives = _RecordingCollectives(torch.tensor([1, 1, 0, 3]))
@@ -367,7 +374,8 @@ def test_global_rank_load_follows_the_policy_declaration_not_its_name(monkeypatc
 @pytest.mark.unit
 def test_lplb_waterfill_counts_local_routed_load_not_planned_load():
     """Local Waterfill after LPLB sees this rank's routed load, not LPLB's
-    EP-wide ``planned_rank_load`` (which stays in the decision metadata)."""
+    EP-wide ``planned_rank_load`` (which stays in the decision metadata), and
+    adds no collective of its own."""
     calls = []
     shared = _SharedRouter(calls)
     collectives = _RecordingCollectives(torch.tensor([1.0, 1.0]))
@@ -394,6 +402,177 @@ def test_lplb_waterfill_counts_local_routed_load_not_planned_load():
     assert not torch.equal(shared.seen_rank_load, torch.tensor([7, 1]))
     assert int(shared.seen_rank_load.sum()) == 4
     assert shared.seen_active is None
+
+
+def _waterfill_request(placement=None, policies=()) -> RoutingRequest:
+    """Physical ids already chosen; rank loads are [1, 3] on two ranks."""
+    return RoutingRequest(
+        layer_id=0,
+        logical_topk_ids=torch.tensor([[0, 1], [0, 1]]),
+        routed_physical_topk_ids=torch.tensor([[0, 2], [2, 2]]),
+        topk_weights=torch.ones((2, 2)),
+        placement=_placement() if placement is None else placement,
+        token_count=2,
+        policies=policies,
+    )
+
+
+def _waterfill_mlb(shared, collectives=None, a2a_backend=None, pipeline=(_GLOBAL_WATERFILL,)):
+    return MoELoadBalancer(
+        placement_planners={},
+        routing_policies={
+            "static": _PhysicalRouter([]),
+            "lplb": _PhysicalRouter([]),
+            "waterfill": shared,
+        },
+        routing_pipeline=list(pipeline) if isinstance(pipeline, tuple) else pipeline,
+        collectives=collectives,
+        a2a_backend=a2a_backend,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("candidates", [None, "routed", "all"])
+def test_default_and_local_waterfill_issue_no_collective(caplog, candidates):
+    metadata = {} if candidates is None else {"candidates": candidates}
+    shared = _SharedRouter([])
+    collectives = _RecordingCollectives(torch.tensor([1, 1, 0, 3]))
+    mlb = _waterfill_mlb(
+        shared, collectives, pipeline=(RoutingPolicyConfig(name="waterfill", metadata=metadata),)
+    )
+
+    with caplog.at_level("WARNING", logger="evenmoe"):
+        mlb.route_tokens(_waterfill_request())
+
+    assert collectives.payloads == []
+    assert torch.equal(shared.seen_rank_load, torch.tensor([1, 3]))
+    assert shared.seen_active is None
+    assert not caplog.records
+
+
+@pytest.mark.unit
+def test_default_waterfill_needs_no_collectives_adapter():
+    shared = _SharedRouter([])
+
+    _waterfill_mlb(shared, pipeline="waterfill").route_tokens(_waterfill_request())
+
+    assert shared.seen_active is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("candidates", ["routed", "all"])
+def test_global_waterfill_gathers_one_collective(candidates):
+    shared = _SharedRouter([])
+    collectives = _RecordingCollectives(torch.tensor([1, 1, 0, 3]))
+    config = RoutingPolicyConfig(
+        name="waterfill", metadata={"load_view": "global", "candidates": candidates}
+    )
+
+    _waterfill_mlb(shared, collectives, a2a_backend=A2A_DEEPEP, pipeline=(config,)).route_tokens(
+        _waterfill_request()
+    )
+
+    assert len(collectives.payloads) == 1
+    assert torch.equal(shared.seen_rank_load, torch.tensor([2, 4]))
+    assert torch.equal(shared.seen_active, torch.tensor([2, 3]))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("case", "reason"),
+    [
+        ("no_collectives", "no RoutingCollectives adapter was provided for EP size 2"),
+        ("no_placement", "no committed PlacementSnapshot"),
+        ("megamoe", "megamoe A2A backend may skip routing"),
+        ("lplb_pipeline", "it is combined with lplb"),
+        ("lplb_override", "it is combined with lplb"),
+    ],
+)
+def test_global_waterfill_falls_back_to_local_load_with_one_warning(case, reason, caplog):
+    shared = _SharedRouter([])
+    collectives = None
+    if case != "no_collectives":
+        collectives = _RecordingCollectives(torch.tensor([1, 1, 0, 3]))
+    pipeline = (_GLOBAL_WATERFILL,)
+    if case == "lplb_pipeline":
+        pipeline = (RoutingPolicyConfig(name="lplb"), _GLOBAL_WATERFILL)
+    with caplog.at_level("WARNING", logger="evenmoe"):
+        mlb = _waterfill_mlb(
+            shared,
+            collectives,
+            a2a_backend=A2A_MEGAMOE if case == "megamoe" else None,
+            pipeline=pipeline,
+        )
+        request = _waterfill_request()
+        if case == "no_placement":
+            waterfill = RoutingPolicyConfig(
+                name="waterfill",
+                metadata={"load_view": "global", "world_size": 2, "experts_per_rank": 2},
+            )
+            request = replace(request, placement=None, policies=(waterfill,))
+        elif case == "lplb_override":
+            # A request-time override was never checked by the configured pipeline.
+            request = replace(request, policies=("lplb", _GLOBAL_WATERFILL))
+        mlb.route_tokens(request)
+        mlb.route_tokens(request)
+
+    assert shared.seen_active is None
+    assert torch.equal(shared.seen_rank_load, torch.tensor([1, 3]))
+    assert collectives is None or collectives.payloads == []
+    warnings = [record.getMessage() for record in caplog.records]
+    assert len(warnings) == 1
+    assert "waterfill falls back (rank_load 'global' -> 'local')" in warnings[0]
+    assert reason in warnings[0]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("configured", "requested", "expect_collective"),
+    [("local", "global", True), ("global", "local", False)],
+)
+def test_request_time_waterfill_options_override_the_configured_ones(
+    configured, requested, expect_collective
+):
+    shared = _SharedRouter([])
+    collectives = _RecordingCollectives(torch.tensor([1, 1, 0, 3]))
+    mlb = _waterfill_mlb(
+        shared,
+        collectives,
+        pipeline=(RoutingPolicyConfig(name="waterfill", metadata={"load_view": configured}),),
+    )
+    override = RoutingPolicyConfig(name="waterfill", metadata={"load_view": requested})
+
+    mlb.route_tokens(_waterfill_request(policies=(override,)))
+
+    assert len(collectives.payloads) == int(expect_collective)
+    assert (shared.seen_active is not None) is expect_collective
+
+
+@pytest.mark.unit
+def test_single_rank_global_waterfill_needs_no_collectives(caplog):
+    shared = _SharedRouter([])
+    placement = PlacementSnapshot(
+        layer_id=0,
+        num_logical_experts=2,
+        num_physical_experts=2,
+        ep_size=1,
+        num_local_physical_experts=2,
+        physical_to_logical_map=torch.tensor([0, 1]),
+        logical_to_physical_candidates=torch.tensor([[0], [1]]),
+        logical_to_physical_count=torch.tensor([1, 1]),
+        default_physical_for_logical=torch.tensor([0, 1]),
+    )
+    # Request-time policies skip the stub physical router (its ids need EP 2).
+    request = replace(
+        _waterfill_request(placement, (_GLOBAL_WATERFILL,)),
+        routed_physical_topk_ids=torch.tensor([[0, 1], [0, 1]]),
+    )
+
+    with caplog.at_level("WARNING", logger="evenmoe"):
+        _waterfill_mlb(shared).route_tokens(request)
+
+    assert torch.equal(shared.seen_active, torch.tensor([2]))
+    assert not caplog.records
 
 
 @pytest.mark.unit
