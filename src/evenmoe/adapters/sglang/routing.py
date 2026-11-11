@@ -65,6 +65,10 @@ class _SGLangCollectives:
     def world_size(self) -> int:
         return self.context.parallel.moe_ep_group.world_size
 
+    @property
+    def device_group(self):
+        return self.context.parallel.moe_ep_group.device_group
+
     def all_reduce_sum(self, payload):
         return self.context.parallel.moe_ep_group.all_reduce(payload)
 
@@ -72,12 +76,15 @@ class _SGLangCollectives:
 def to_load_balancer_kwargs(context: RuntimeContext) -> dict:
     """Translate engine configuration to the generic EvenMoE constructor arguments."""
     layout = placement_adapter._expert_layout(context)
+    collectives = _SGLangCollectives(context)
     return {
         "algorithm": context.config_bag("exec").moe.moe_load_balancer_algorithm,
         "ep_size": layout["ep_size"],
         "source_rank": context.parallel.moe_ep_rank,
         "experts_per_rank": layout["num_local_physical_experts"],
-        "collectives": _SGLangCollectives(context),
+        "collectives": collectives,
+        # Router build option for policies that exchange counts themselves (waterfill tile mode).
+        "ep_collectives": collectives,
     }
 
 

@@ -326,13 +326,13 @@ class MoELoadBalancer:
 
                 # The shared-expert policy levels this rank's own contribution,
                 # so it reads this rank's realised routed load.
-                routed_rank_load = self._rank_load_counter(
+                spec = self._policy_spec(policy_config)
+                routed_rank_load = None if spec is not None and spec.rank_load is None else self._rank_load_counter(
                     current_physical,
                     request.placement,
                     policy_config,
                 )
 
-                spec = self._policy_spec(policy_config)
                 if spec is not None and spec.rank_load == "global":
                     routed_rank_load, active_rank_token_count = self._global_rank_load(
                         routed_rank_load, request
