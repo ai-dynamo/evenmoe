@@ -7,9 +7,12 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from evenmoe import MoELoadBalancer, RoutingDecision
+from evenmoe import MoELoadBalancer, PlacementPlan, RoutingDecision, RoutingPipeline
 from evenmoe.adapters.sglang import (
     placement,
+    plan_initial_placement,
+    plan_layer_from_topk,
+    to_deployment_config,
     to_load_balancer_kwargs,
     to_placement_request,
     to_placement_snapshot,
@@ -195,6 +198,18 @@ def test_collective_transport_reads_current_group(engine):
     replacement.all_reduce.assert_called_once_with(payload)
 
 
+def test_collective_transport_gathers_into_one_flat_tensor(engine):
+    _mlb, ctx = engine
+    transport = to_load_balancer_kwargs(ctx)["collectives"]
+    group = Mock(rank_in_group=1, world_size=2)
+    ctx.parallel.moe_ep_group = group
+    payload = torch.tensor([3, 1, 4], dtype=torch.int32)
+    gathered = transport.all_gather(payload)
+    output, sent = group.all_gather_into_tensor.call_args.args
+    assert output is gathered and sent is payload
+    assert gathered.shape == (6,) and gathered.dtype == torch.int32
+
+
 def test_planning_reads_context_and_keeps_per_call_inputs_explicit(engine):
     _mlb, ctx = engine
     counts = torch.tensor([[[10, 20]]])
@@ -297,3 +312,189 @@ def test_coupled_placement_rejects_uneven_node_distribution(engine):
     ctx.parallel.nnodes = 3
     with pytest.raises(ValueError, match="evenly distributed"):
         to_placement_request(torch.ones((4, 1, 2)), context=ctx)
+
+
+def test_initial_placement_comes_from_the_coupled_policy(engine):
+    _, ctx = engine
+    ctx.config_bag("exec").moe.moe_load_balancer_algorithm = "ultraep"
+    ctx.resources.mlb_model_info["num_logical_experts"] = 4
+    ctx.config_bag("exec").moe.ep_num_redundant_experts = 2
+    ctx.parallel.nnodes = 1
+    mlb = MoELoadBalancer.from_algorithm(**to_load_balancer_kwargs(ctx))
+    maps = plan_initial_placement(mlb, ctx, num_layers=2)
+    # Two ranks of three slots: masters 2r, 2r+1, then the rank's first master.
+    assert maps.physical_to_logical_map.tolist() == [[0, 1, 0, 2, 3, 2]] * 2
+    assert maps.logical_to_physical_count.tolist() == [[2, 1, 2, 1]] * 2
+    assert maps.routing_metadata == {}
+
+
+def test_initial_placement_is_left_to_sglang_without_a_coupled_policy(engine):
+    mlb, ctx = engine
+    assert plan_initial_placement(mlb, ctx, num_layers=2) is None
+
+
+class _TwoRankCollectives:
+    """One rank of a two-rank EP group whose peer routed one token to expert 1."""
+
+    world_size = 2
+
+    def __init__(self, rank=0):
+        self.rank = rank
+        self.payloads = []
+
+    def all_reduce_sum(self, payload):
+        self.payloads.append(payload.clone())
+        peer_count = torch.tensor([0, 1], dtype=payload.dtype)
+        if payload.numel() == peer_count.numel():
+            return payload + peer_count
+        peer = torch.zeros_like(payload)
+        peer.view(self.world_size, -1)[1 - self.rank] = peer_count
+        return payload + peer
+
+
+class _RecordingPlanner:
+    def __init__(self, plan, per_rank):
+        self.result = plan
+        self.requires_per_source_rank_statistics = per_rank
+        self.requests = []
+
+    def plan(self, request):
+        self.requests.append(request)
+        return self.result
+
+
+def _layer_mlb(plan, per_rank=True):
+    """A balancer whose ``deepseek`` planner (the context's eplb_algorithm)
+    records its request, with a two-rank collective."""
+    planner = _RecordingPlanner(plan, per_rank)
+    collectives = _TwoRankCollectives()
+    mlb = MoELoadBalancer(placement_planners={"deepseek": planner}, collectives=collectives)
+    return mlb, planner, collectives
+
+
+def test_layer_plan_gathers_every_rank_and_keys_routing_state_by_layer(engine):
+    _, ctx = engine
+    quota = torch.tensor([[[1, 2], [2, 3]]], dtype=torch.int32)
+    plan = PlacementPlan(
+        physical_to_logical_map=torch.tensor([[0, 1, 0, 1]], dtype=torch.int32),
+        logical_to_all_physical_map=torch.tensor([[[0, 2], [1, 3]]], dtype=torch.int32),
+        logical_to_physical_count=torch.tensor([[2, 2]], dtype=torch.int32),
+        metadata={"rank_quota_prefix": quota},
+    )
+    mlb, planner, collectives = _layer_mlb(plan)
+
+    maps = plan_layer_from_topk(mlb, ctx, 5, torch.tensor([[0, 0], [1, -1]]))
+
+    # This rank contributes only its own row, flattened so a framework
+    # all-reduce cannot take it for [tokens, hidden]; padding (-1) is not counted.
+    assert collectives.payloads[0].tolist() == [2, 1, 0, 0]
+    (request,) = planner.requests
+    assert request.policy.name == "deepseek"
+    assert request.stats.logical_count.tolist() == [[[2, 1]], [[0, 1]]]
+    assert list(maps.routing_metadata) == [5]
+    assert maps.routing_metadata[5]["rank_quota_prefix"].data_ptr() == quota[0].data_ptr()
+    assert maps.physical_to_logical_map is plan.physical_to_logical_map
+
+
+def test_layer_plan_without_routing_state_publishes_none(engine):
+    _, ctx = engine
+    mlb, _, _ = _layer_mlb(_SINGLE_LAYER_PLAN)
+    maps = plan_layer_from_topk(mlb, ctx, 3, torch.tensor([[0, 1]]))
+    assert maps.routing_metadata == {}
+
+
+_SINGLE_LAYER_PLAN = PlacementPlan(
+    physical_to_logical_map=torch.tensor([[0, 1, 0, 1]], dtype=torch.int32),
+    logical_to_all_physical_map=torch.tensor([[[0, 2], [1, 3]]], dtype=torch.int32),
+    logical_to_physical_count=torch.tensor([[2, 2]], dtype=torch.int32),
+)
+
+
+def test_layer_plan_sums_ranks_for_a_policy_without_per_rank_statistics(engine):
+    _, ctx = engine
+    mlb, planner, collectives = _layer_mlb(_SINGLE_LAYER_PLAN, per_rank=False)
+
+    plan_layer_from_topk(mlb, ctx, 3, torch.tensor([[0, 0], [1, -1]]))
+
+    # Only this rank's [experts] vector goes over the wire, not a [ranks, experts] matrix.
+    assert [p.tolist() for p in collectives.payloads] == [[2, 1]]
+    (request,) = planner.requests
+    assert request.stats.logical_count.tolist() == [[[2, 2]]]
+
+
+class _UltraEPBackend:
+    """Records what the UltraEP kernel would be given; solves to the master layout."""
+
+    def __init__(self):
+        self.calls = []
+
+    def solve(self, **kwargs):
+        self.calls.append(kwargs)
+        kwargs["physical_to_logical_map"].copy_(torch.tensor([0, 0, 1, 1], dtype=torch.int32))
+        kwargs["logical_to_physical_map"].fill_(-1)
+        kwargs["logical_to_physical_map"][:, 0].copy_(torch.tensor([0, 2], dtype=torch.int32))
+        kwargs["logical_replica_counts"].fill_(1)
+        kwargs["rank_quota_prefix"].fill_(7)
+
+
+@pytest.mark.parametrize(
+    "routing, eplb_algorithm, configured",
+    [
+        ("ultraep", "deepseek", "ultraep"),
+        # UltraEP placement under static routing: the balancer has no placement
+        # policy configured, and the context's eplb_algorithm still picks UltraEP.
+        ("static", "ultraep", None),
+    ],
+)
+def test_layer_plan_hands_ultraep_its_own_rank_and_every_rank_row(
+    engine, routing, eplb_algorithm, configured
+):
+    """Through the real UltraEP L1 policy: the rank SGLang names in the policy
+    metadata and the row this rank fills in the gather are the same rank."""
+    from evenmoe.policies.l1.ultraep import UltraEPPlacementPolicy
+
+    _, ctx = engine
+    ctx.config_bag("exec").moe.moe_load_balancer_algorithm = routing
+    ctx.config_bag("exec").moe.eplb_algorithm = eplb_algorithm
+    ctx.parallel.moe_ep_rank = 1
+    backend = _UltraEPBackend()
+    mlb = MoELoadBalancer(
+        placement_planners={"ultraep": UltraEPPlacementPolicy(backend=backend)},
+        placement_policy=configured,
+        collectives=_TwoRankCollectives(rank=1),
+    )
+
+    maps = plan_layer_from_topk(mlb, ctx, 7, torch.tensor([[0, 0], [0, -1]]))
+
+    (call,) = backend.calls
+    assert call["rank"] == 1
+    assert call["expert_loads_per_rank"].tolist() == [[0, 1], [3, 0]]
+    assert call["expert_loads"].tolist() == [3, 1]
+    assert maps.physical_to_logical_map.tolist() == [[0, 0, 1, 1]]
+    assert list(maps.routing_metadata) == [7]
+    assert maps.routing_metadata[7]["rank_quota_prefix"].unique().tolist() == [7]
+
+
+def test_deployment_config_lets_ultraep_report_its_layout_at_startup(engine):
+    _, ctx = engine
+    deployment = to_deployment_config(ctx, routes_shared_expert=False)
+    assert deployment.ep_size == 2
+    assert deployment.num_logical_experts == 2
+    assert deployment.num_redundant_experts == 2
+    assert deployment.carries_placement_metadata
+    assert RoutingPipeline.from_value("ultraep").is_applicable(deployment) is None
+
+    ctx.config_bag("exec").moe.ep_num_redundant_experts = 3
+    reason = RoutingPipeline.from_value("ultraep").is_applicable(
+        to_deployment_config(ctx, routes_shared_expert=False)
+    )
+    assert reason is not None and "split evenly" in reason
+
+
+def test_deployment_config_before_model_info_skips_only_the_expert_count(engine):
+    _, ctx = engine
+    ctx.resources.mlb_model_info = None
+    deployment = to_deployment_config(ctx, routes_shared_expert=True)
+    assert deployment.num_logical_experts is None
+    assert deployment.ep_size == 2
+    assert deployment.routes_shared_expert

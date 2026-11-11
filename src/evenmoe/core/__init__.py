@@ -3,7 +3,7 @@
 
 """Framework-neutral contracts and the unified orchestrator."""
 
-from evenmoe.core.l1 import PlacementPlanner
+from evenmoe.core.l1 import InitialPlacementPlanner, PlacementPlanner
 from evenmoe.core.l2 import RoutingLoadHistoryProvider, TokenRouter
 from evenmoe.core.orchestrator import MoELoadBalancer
 from evenmoe.core.types import (
@@ -23,6 +23,7 @@ from evenmoe.core.types import (
 )
 
 __all__ = [
+    "InitialPlacementPlanner",
     "MoELoadBalancer",
     "PlacementPlan",
     "PlacementPlanner",

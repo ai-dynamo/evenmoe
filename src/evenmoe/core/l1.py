@@ -5,11 +5,35 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from evenmoe.core.types import PlacementPlan, PlacementRequest
+from evenmoe.core.types import PlacementPlan, PlacementRequest, PlacementTopology
 
 
 @runtime_checkable
 class PlacementPlanner(Protocol):
-    """Framework-neutral L1 candidate-placement policy."""
+    """Framework-neutral L1 candidate-placement policy.
+
+    A planner that solves from each source EP rank's own TopK counts sets the
+    class attribute ``requires_per_source_rank_statistics = True``; its
+    ``request.stats.logical_count`` is then ``[ranks, layers, logical_experts]``
+    rather than summed over ranks. Absent means False. Frameworks read it
+    through :meth:`MoELoadBalancer.requires_per_source_rank_statistics`.
+    """
 
     def plan(self, request: PlacementRequest) -> PlacementPlan: ...
+
+
+@runtime_checkable
+class InitialPlacementPlanner(Protocol):
+    """An L1 policy whose placement before any statistics is its own layout.
+
+    Optional: a planner without ``initial_plan`` leaves the initial placement
+    to the framework's default.
+    """
+
+    def initial_plan(
+        self,
+        topology: PlacementTopology,
+        *,
+        num_logical_experts: int,
+        num_layers: int,
+    ) -> PlacementPlan: ...

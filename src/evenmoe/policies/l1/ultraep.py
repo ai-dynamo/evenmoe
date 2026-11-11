@@ -22,6 +22,7 @@ from evenmoe.core.types import (
     PlacementPlan,
     PlacementPolicyConfig,
     PlacementRequest,
+    PlacementTopology,
 )
 from evenmoe.kernels.ultraep import (
     UltraEPKernels,
@@ -35,6 +36,7 @@ class UltraEPPlacementPolicy(PlacementPlanner):
     """Compute replica placement from per-rank logical expert loads."""
 
     name = "ultraep"
+    requires_per_source_rank_statistics = True
 
     def __init__(
         self,
@@ -73,14 +75,10 @@ class UltraEPPlacementPolicy(PlacementPlanner):
             raise ValueError("logical_count must have shape [samples, layers, experts].")
 
         topology = request.topology
-        ep_size = topology.num_physical_experts // topology.num_local_physical_experts
         num_layers, num_logical_experts = logical_count.shape[1:]
-        if ep_size <= 1 or num_logical_experts % ep_size != 0:
-            raise ValueError("UltraEP requires divisible experts and ep_size > 1.")
-        num_local_master_experts = num_logical_experts // ep_size
-        num_local_redundant_experts = topology.num_local_physical_experts - num_local_master_experts
-        if num_local_redundant_experts <= 0:
-            raise ValueError("UltraEP requires rank-local redundant expert slots.")
+        ep_size, num_local_master_experts, num_local_redundant_experts = _rank_local_layout(
+            topology, num_logical_experts
+        )
 
         rank = int(policy.metadata.get("rank", 0))
         num_nvl_ranks = int(policy.metadata.get("num_nvl_ranks", ep_size))
@@ -143,14 +141,9 @@ class UltraEPPlacementPolicy(PlacementPlanner):
         # stream once per solve, which under UltraEP's fast refresh is once per
         # layer per refresh. The where() is a no-op when nothing is unassigned.
         unassigned = physical_to_logical < 0
-        physical_ids = torch.arange(
-            topology.num_physical_experts, device=physical_to_logical.device
+        fallback = _rank_local_master_slots(
+            topology, num_local_master_experts, device=physical_to_logical.device
         )
-        local_idx = physical_ids % topology.num_local_physical_experts
-        rank_of_slot = physical_ids // topology.num_local_physical_experts
-        fallback = (
-            rank_of_slot * num_local_master_experts + local_idx % num_local_master_experts
-        ).to(torch.int32)
         physical_to_logical = torch.where(unassigned, fallback, physical_to_logical)
 
         return PlacementPlan(
@@ -163,6 +156,83 @@ class UltraEPPlacementPolicy(PlacementPlanner):
                 "rank_quota_prefix": rank_quota_prefix,
             },
         )
+
+    def initial_plan(
+        self,
+        topology: PlacementTopology,
+        *,
+        num_logical_experts: int,
+        num_layers: int,
+    ) -> PlacementPlan:
+        """UltraEP's layout before any traffic: every rank holds its fixed master
+        experts followed by its redundant slots, filled with its own masters
+        round-robin. Later solves re-plan only the redundant slots.
+
+        The plan carries no quota, so UltraEP's router sends each logical expert
+        to its master until the first solve publishes one.
+
+        The maps have the same shapes as :meth:`plan`'s, so a framework can
+        commit either into the same buffers: ``logical_to_all_physical_map`` is
+        ``ep_size`` wide. Like :meth:`plan`, it lists at most ``ep_size``
+        replicas per expert; in the rare layout where round-robin gives an
+        expert more slots than that, the extra slots hold the expert but nothing
+        routes to them, as with slots a solve declines.
+        """
+        if num_layers <= 0:
+            raise ValueError("UltraEP initial placement requires a positive num_layers.")
+        ep_size, num_local_master_experts, _ = _rank_local_layout(topology, num_logical_experts)
+        slots = _rank_local_master_slots(topology, num_local_master_experts)
+        logical_ids = slots.long()
+        replica_counts = torch.bincount(logical_ids, minlength=num_logical_experts)
+        # Each expert's replicas in ascending physical id, so its master comes first.
+        order = torch.argsort(logical_ids, stable=True)
+        first_replica = torch.cumsum(replica_counts, dim=0) - replica_counts
+        column = torch.arange(slots.numel()) - first_replica[logical_ids[order]]
+        listed = column < ep_size
+        logical_to_physical = torch.full((num_logical_experts, ep_size), -1, dtype=torch.int32)
+        logical_to_physical[logical_ids[order][listed], column[listed]] = order[listed].to(
+            torch.int32
+        )
+        replica_counts = replica_counts.clamp(max=ep_size).to(torch.int32)
+        return PlacementPlan(
+            physical_to_logical_map=slots.repeat(num_layers, 1),
+            logical_to_all_physical_map=logical_to_physical.repeat(num_layers, 1, 1),
+            logical_to_physical_count=replica_counts.repeat(num_layers, 1),
+            metadata={"requested_policy": self.name, "resolved_policy": self.name},
+        )
+
+
+def _rank_local_layout(
+    topology: PlacementTopology, num_logical_experts: int
+) -> tuple[int, int, int]:
+    """``(ep_size, masters per rank, redundant slots per rank)`` for UltraEP."""
+    ep_size = topology.num_physical_experts // topology.num_local_physical_experts
+    if ep_size <= 1 or num_logical_experts % ep_size != 0:
+        raise ValueError("UltraEP requires divisible experts and ep_size > 1.")
+    num_local_master_experts = num_logical_experts // ep_size
+    num_local_redundant_experts = topology.num_local_physical_experts - num_local_master_experts
+    if num_local_redundant_experts <= 0:
+        raise ValueError("UltraEP requires rank-local redundant expert slots.")
+    return ep_size, num_local_master_experts, num_local_redundant_experts
+
+
+def _rank_local_master_slots(
+    topology: PlacementTopology,
+    num_local_master_experts: int,
+    *,
+    device: torch.device | str | None = None,
+) -> torch.Tensor:
+    """Each physical slot's logical expert in UltraEP's master layout.
+
+    Slot ``i`` of rank ``r`` holds master ``r * M + i % M``: the first ``M`` slots
+    are the rank's own masters, and its redundant slots repeat them round-robin.
+    """
+    physical_ids = torch.arange(topology.num_physical_experts, device=device)
+    local_idx = physical_ids % topology.num_local_physical_experts
+    rank_of_slot = physical_ids // topology.num_local_physical_experts
+    return (rank_of_slot * num_local_master_experts + local_idx % num_local_master_experts).to(
+        torch.int32
+    )
 
 
 class RefreshGate:

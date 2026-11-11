@@ -3,7 +3,7 @@
 
 """Framework-decoupled MoE load-balancing policies and adapters."""
 
-from evenmoe.core.l1 import PlacementPlanner
+from evenmoe.core.l1 import InitialPlacementPlanner, PlacementPlanner
 from evenmoe.core.l2 import (
     RoutingCollectives,
     RoutingLoadHistoryProvider,
@@ -42,6 +42,7 @@ __all__ = [
     "A2A_DEEPEP",
     "A2A_MEGAMOE",
     "ExpertDeploymentConfig",
+    "InitialPlacementPlanner",
     "InputTransformSpec",
     "LPLBKernels",
     "MoELoadBalancer",
