@@ -73,6 +73,12 @@ class _SGLangCollectives:
     def all_reduce_sum(self, payload):
         return self.context.parallel.moe_ep_group.all_reduce(payload)
 
+    def all_gather(self, payload):
+        group = self.context.parallel.moe_ep_group
+        output = payload.new_empty(group.world_size * payload.numel())
+        group.all_gather_into_tensor(output, payload)
+        return output
+
 
 def to_deployment_config(
     context: RuntimeContext, *, routes_shared_expert: bool

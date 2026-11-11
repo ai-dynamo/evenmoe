@@ -198,6 +198,18 @@ def test_collective_transport_reads_current_group(engine):
     replacement.all_reduce.assert_called_once_with(payload)
 
 
+def test_collective_transport_gathers_into_one_flat_tensor(engine):
+    _mlb, ctx = engine
+    transport = to_load_balancer_kwargs(ctx)["collectives"]
+    group = Mock(rank_in_group=1, world_size=2)
+    ctx.parallel.moe_ep_group = group
+    payload = torch.tensor([3, 1, 4], dtype=torch.int32)
+    gathered = transport.all_gather(payload)
+    output, sent = group.all_gather_into_tensor.call_args.args
+    assert output is gathered and sent is payload
+    assert gathered.shape == (6,) and gathered.dtype == torch.int32
+
+
 def test_planning_reads_context_and_keeps_per_call_inputs_explicit(engine):
     _mlb, ctx = engine
     counts = torch.tensor([[[10, 20]]])

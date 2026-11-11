@@ -308,10 +308,12 @@ class MoELoadBalancer:
         configured one by default): ``[ep_size, layers, logical_experts]`` with
         one row per source rank when
         :meth:`requires_per_source_rank_statistics` holds, otherwise the
-        ``[1, layers, logical_experts]`` EP-wide sum. Runs one AllReduce
+        ``[1, layers, logical_experts]`` EP-wide sum. Runs one collective
         through the injected :class:`RoutingCollectives`, so every EP rank
-        must call it together. The payload is 1-D: a framework all-reduce may
-        pick its kernel by shape and treat a 2-D tensor as activations.
+        must call it together: its ``all_gather`` for per-source-rank counts
+        when it has one, otherwise an AllReduce. The payload is 1-D: a
+        framework all-reduce may pick its kernel by shape and treat a 2-D
+        tensor as activations.
         """
 
         import torch
@@ -323,6 +325,17 @@ class MoELoadBalancer:
             if not isinstance(reduced, torch.Tensor):
                 raise TypeError("Logical-count AllReduce must return a torch.Tensor.")
             return reduced.view(1, *local_count.shape)
+        collectives = self._collectives
+        all_gather = getattr(collectives, "all_gather", None)
+        if collectives is not None and all_gather is not None:
+            if collectives.world_size != ep_size:
+                raise ValueError("RoutingCollectives.world_size does not match the EP size.")
+            gathered = all_gather(local_count.reshape(-1).contiguous())
+            if not isinstance(gathered, torch.Tensor):
+                raise TypeError("Logical-count AllGather must return a torch.Tensor.")
+            if gathered.numel() != ep_size * local_count.numel():
+                raise ValueError("Logical-count AllGather must return every EP rank's counts.")
+            return gathered.view(ep_size, *local_count.shape)
         rank = 0 if ep_size == 1 and self._collectives is None else self._collective_rank()
         if not 0 <= rank < ep_size:
             raise ValueError("Collective rank is outside the EP group.")

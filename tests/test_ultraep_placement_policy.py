@@ -399,6 +399,56 @@ def test_aggregate_logical_count_follows_the_placement_policy():
     assert summed.tolist() == [[[3, 1, 2, 1]]]
 
 
+class _GatheringCollectives(_Collectives):
+    def __init__(self, rank=0, world_size=2, peer=None):
+        super().__init__(rank=rank, world_size=world_size)
+        self.peer = peer
+        self.gathered = []
+
+    def all_gather(self, payload):
+        self.gathered.append(payload.clone())
+        rows = [self.peer] * self.world_size
+        rows[self.rank] = payload
+        return torch.cat(rows)
+
+
+@pytest.mark.unit
+def test_aggregate_logical_count_gathers_when_the_transport_can():
+    """A transport with ``all_gather`` gathers per-source-rank counts directly;
+    the EP-wide sum still all-reduces."""
+    from evenmoe import MoELoadBalancer
+
+    local = torch.tensor([[2, 0, 1, 0]], dtype=torch.int32)
+    collectives = _GatheringCollectives(rank=1, peer=torch.tensor([0, 1, 0, 3], dtype=torch.int32))
+    mlb = MoELoadBalancer(routing_pipeline="ultraep", collectives=collectives)
+
+    per_rank = mlb.aggregate_logical_count(local, ep_size=2)
+    # Only this rank's own counts go on the wire, and nothing is all-reduced.
+    assert [p.tolist() for p in collectives.gathered] == [[2, 0, 1, 0]]
+    assert collectives.payloads == []
+    assert per_rank.tolist() == [[[0, 1, 0, 3]], [[2, 0, 1, 0]]]
+
+    summed = mlb.aggregate_logical_count(local, ep_size=2, placement_policy="deepseek")
+    assert collectives.payloads[-1].tolist() == [2, 0, 1, 0]
+    assert summed.tolist() == [[[3, 1, 2, 1]]]
+    assert len(collectives.gathered) == 1
+
+    with pytest.raises(ValueError, match="world_size"):
+        MoELoadBalancer(
+            routing_pipeline="ultraep",
+            collectives=_GatheringCollectives(world_size=4, peer=local[0]),
+        ).aggregate_logical_count(local, ep_size=2)
+
+    class _Short(_GatheringCollectives):
+        def all_gather(self, payload):
+            return payload
+
+    with pytest.raises(ValueError, match="every EP rank"):
+        MoELoadBalancer(
+            routing_pipeline="ultraep", collectives=_Short(peer=local[0])
+        ).aggregate_logical_count(local, ep_size=2)
+
+
 @pytest.mark.unit
 def test_aggregate_logical_count_checks_its_collectives():
     from evenmoe import MoELoadBalancer
