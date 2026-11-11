@@ -54,16 +54,25 @@ Compose L2 policies with `+`, for example `lplb+waterfill` or `ultraep+waterfill
 
 ### Waterfill options
 
-Waterfill picks one EP rank per token for its shared-expert row. Two independent options shape the choice; the defaults suit most deployments and need no configuration.
+Waterfill picks one EP rank per token for its shared-expert row. Two independent options shape the choice:
 
-| Option | Values | Default | Meaning |
+| Option | Environment variable | Values | Default | Meaning |
+|:---|:---|:---|:---|:---|
+| Load view | `WATERFILL_LOAD_VIEW` | `local` / `global` | `local` | `local` balances against this rank's own routed load, with no collective. `global` all-reduces every rank's routed load and token count once per MoE layer (2 × EP int64 values). |
+| Candidate set | `WATERFILL_CANDIDATES` | `routed` / `all` | `routed` | `routed` keeps the shared row on the source rank or a rank the token's routed experts already go to, so it adds no new dispatch destination. `all` allows any rank. |
+
+Set them in the serving framework's environment (every server process inherits them) to choose one of four combinations. Measured on DeepSeek-V3, 8 × H20, SGLang prefill, three rounds, change versus EPLB (same-domain GSM8K / MMLU; cross-domain GSM8K / MMLU):
+
+| Combination | Environment | Prefill vs EPLB | When to use |
 |:---|:---|:---|:---|
-| `load_view` | `local` / `global` | `local` | `local` balances against this rank's own routed load, with no collective. `global` all-reduces every rank's routed load and token count once per MoE layer (2 × EP int64 values). |
-| `candidates` | `routed` / `all` | `routed` | `routed` keeps the shared row on the source rank or a rank the token's routed experts already go to, so it adds no new dispatch destination. `all` allows any rank. |
+| `local` + `routed` (default) | *(none)* | −0.39% / −0.32%; +3.93% / +3.18% | Most deployments, and any decode instance. No collective, works with every L2 pipeline and A2A backend. |
+| `global` + `routed` | `WATERFILL_LOAD_VIEW=global` | +0.35% / +0.12%; +4.30% / +3.86% | Fastest for prefill-only instances on DeepEP. The per-layer all-reduce costs decode: on GLM-5.3 at concurrency 8 / 64 it raised TPOT 9–12% over EPLB, against 5% for `local` + `all`. Does not combine with LPLB (see below). |
+| `local` + `all` | `WATERFILL_CANDIDATES=all` | −0.7% / −0.6%; +4.0% / +3.2% | Reproducing results from before `routed` became the default. |
+| `global` + `all` | `WATERFILL_LOAD_VIEW=global WATERFILL_CANDIDATES=all` | not yet benchmarked | Same constraints as `global` + `routed`; lets the shared row go to any rank. |
 
-Consider `load_view=global` for prefill-only instances on DeepEP, where it measured slightly higher throughput; keep the default for decode, where the per-layer all-reduce lengthens small-batch TPOT. Global falls back to `local`, keeping `candidates`, and logs one warning when its collective cannot run safely: after LPLB, when the framework passes no `collectives` and EP > 1, when no committed placement is available, and on the MegaMoE A2A backend.
+`global` falls back to `local`, keeping the candidate set, and logs one warning when its collective cannot run safely: after LPLB (for example `lplb+waterfill`), when the framework passes no `collectives` and EP > 1, when no committed placement is available, and on the MegaMoE A2A backend.
 
-Both are policy configuration:
+Programmatic callers can set the same options per policy in `RoutingPolicyConfig.metadata`, which takes precedence over the environment:
 
 ```python
 from evenmoe import MoELoadBalancer, RoutingPipeline, RoutingPolicyConfig
@@ -77,8 +86,6 @@ mlb = MoELoadBalancer.from_algorithm(
 )
 # or per call: RoutingRequest(..., policies=("dynamic", waterfill))
 ```
-
-The SGLang and vLLM selectors (`--moe-load-balancer-algorithm`, `VLLM_EVENMOE_L2_ALGORITHM`) pass only the algorithm name, so they run the defaults. For experiments only, `WATERFILL_LOAD_VIEW=local|global` and `WATERFILL_CANDIDATES=routed|all` override the defaults in every process; options set in `metadata` still win. Normal use does not need them.
 
 ¹ METRO acts on decode steps and needs the vLLM integration's METRO decode-routing fixes. In vLLM it helps only at small decode batches: on DeepSeek-V3 EP8 (H20) with 64 redundant experts it lowered TPOT by 4.4% at 1 request per rank and raised it from 16 requests per rank. See [vLLM](#vllm).
 
@@ -184,7 +191,7 @@ Keep the launch flags and change the two selectors to switch algorithms:
 | UltraEP + Waterfill | `auto` | `ultraep+waterfill` |
 | METRO on a fixed placement (drop `--enable-eplb`) | *(omit)* | `metro` |
 
-LPLB requires redundant replicas (`--ep-num-redundant-experts > 0`) and a recorded placement passed via `--init-expert-location` (produced once with `--enable-eplb`). [METRO](https://arxiv.org/abs/2512.09277) assigns each decode step's active replicated experts to ranks so every rank reads as few distinct expert weights as possible, and routes prefill and mixed steps with the static replica rule. It has been validated only on a fixed placement: keep `--ep-num-redundant-experts` and `--init-expert-location`, drop `--enable-eplb`, select `metro`, and retain DeepEP. Waterfill requires a shared-expert model. To run Waterfill without periodic EPLB, drop `--enable-eplb`/`--eplb-algorithm`, select `waterfill`, and retain DeepEP.
+LPLB requires redundant replicas (`--ep-num-redundant-experts > 0`) and a recorded placement passed via `--init-expert-location` (produced once with `--enable-eplb`). [METRO](https://arxiv.org/abs/2512.09277) assigns each decode step's active replicated experts to ranks so every rank reads as few distinct expert weights as possible, and routes prefill and mixed steps with the static replica rule. It has been validated only on a fixed placement: keep `--ep-num-redundant-experts` and `--init-expert-location`, drop `--enable-eplb`, select `metro`, and retain DeepEP. Waterfill requires a shared-expert model. To run Waterfill without periodic EPLB, drop `--enable-eplb`/`--eplb-algorithm`, select `waterfill`, and retain DeepEP. Choose Waterfill's load view and candidate set by exporting `WATERFILL_LOAD_VIEW` / `WATERFILL_CANDIDATES` before launching the server; see [Waterfill options](#waterfill-options).
 
 ### vLLM
 
@@ -226,7 +233,7 @@ Keep the launch flags and change the environment variables to select an algorith
 | UltraEP placement with static routing | `ultraep` | `static` |
 | METRO on a fixed placement | `deepseek_hierarchical` | `metro` |
 
-Waterfill requires a supported shared-expert model and an evenly divisible physical-expert layout; the branch enables shared-expert fusion when Waterfill is selected. LPLB, METRO and UltraEP require redundant experts. METRO acts on decode steps, so decode with `deepep_low_latency`, and set `EVENMOE_FRESH_COUNTS=1` so every layer routes on the current step's expert counts rather than the previous step's. It has been validated only on a fixed placement: load one with `"init_placement_path"` and set a `"step_interval"` that is never reached. Unlike in SGLang, the per-layer count, all-reduce and route before dispatch are not overlapped with the shared-expert GEMM, so METRO pays off only at small decode batches. Keep `use_async` set to `false` and `--enforce-eager`. `--numa-bind` pins each engine to its GPU's CPU socket and is recommended on two-socket nodes. For a periodic re-fit (`"step_interval"` below 1000) also set `"window_size"` to the same value.
+Waterfill requires a supported shared-expert model and an evenly divisible physical-expert layout; the branch enables shared-expert fusion when Waterfill is selected. Its load view and candidate set come from `WATERFILL_LOAD_VIEW` / `WATERFILL_CANDIDATES`, set alongside the `VLLM_EVENMOE_*` variables; see [Waterfill options](#waterfill-options). LPLB, METRO and UltraEP require redundant experts. METRO acts on decode steps, so decode with `deepep_low_latency`, and set `EVENMOE_FRESH_COUNTS=1` so every layer routes on the current step's expert counts rather than the previous step's. It has been validated only on a fixed placement: load one with `"init_placement_path"` and set a `"step_interval"` that is never reached. Unlike in SGLang, the per-layer count, all-reduce and route before dispatch are not overlapped with the shared-expert GEMM, so METRO pays off only at small decode batches. Keep `use_async` set to `false` and `--enforce-eager`. `--numa-bind` pins each engine to its GPU's CPU socket and is recommended on two-socket nodes. For a periodic re-fit (`"step_interval"` below 1000) also set `"window_size"` to the same value.
 
 Start **UltraEP** on the same topology, refreshing every 8 representative prefill batches:
 

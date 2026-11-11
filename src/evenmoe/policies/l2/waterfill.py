@@ -45,12 +45,13 @@ so the weights are exactly ``W`` times the ``local``+``all`` weights (up to
 the ceiling in ``target_total``); only the candidate set differs. Every path
 is sync-free.
 
-Both options are policy configuration: ``RoutingPolicyConfig(name="waterfill",
-metadata={"load_view": ..., "candidates": ...})``. Framework selectors that
-pass only an algorithm string (SGLang ``--moe-load-balancer-algorithm``, vLLM
-``VLLM_EVENMOE_L2_ALGORITHM``) get the defaults; for experiments the
-``WATERFILL_LOAD_VIEW`` / ``WATERFILL_CANDIDATES`` environment variables
-override the defaults (``metadata`` still wins over them).
+Deployments set the options with the ``WATERFILL_LOAD_VIEW`` (``local`` /
+``global``) and ``WATERFILL_CANDIDATES`` (``routed`` / ``all``) environment
+variables, since the framework selectors (SGLang
+``--moe-load-balancer-algorithm``, vLLM ``VLLM_EVENMOE_L2_ALGORITHM``) carry
+only the algorithm name. Programmatic callers can instead set them per policy
+in ``RoutingPolicyConfig(name="waterfill", metadata={"load_view": ...,
+"candidates": ...})``, which takes precedence over the environment.
 """
 
 from __future__ import annotations
@@ -76,7 +77,7 @@ CANDIDATE_SETS = ("routed", "all")
 DEFAULT_LOAD_VIEW = "local"
 DEFAULT_CANDIDATES = "routed"
 
-# Experiment-only overrides of the defaults; normal use does not need them.
+# The deployment-wide settings; RoutingPolicyConfig.metadata overrides them.
 _LOAD_VIEW_ENV = "WATERFILL_LOAD_VIEW"
 _CANDIDATES_ENV = "WATERFILL_CANDIDATES"
 
@@ -84,8 +85,9 @@ _CANDIDATES_ENV = "WATERFILL_CANDIDATES"
 def waterfill_option(config: RoutingPolicyConfig | None, option: str) -> str:
     """Resolve ``load_view`` or ``candidates`` for one Waterfill selection.
 
-    Precedence: ``config.metadata[option]``, then the option's
-    experiment-only environment variable, then the default.
+    Precedence: ``config.metadata[option]``, then the option's environment
+    variable (``WATERFILL_LOAD_VIEW`` / ``WATERFILL_CANDIDATES``), then the
+    default.
     """
 
     if option == "load_view":

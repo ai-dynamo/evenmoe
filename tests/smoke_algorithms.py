@@ -189,7 +189,7 @@ CASES = [
     ("invalid unknown", "unknown", {}),
 ]
 
-# Waterfill's options are set through the experiment-only env overrides here.
+# Waterfill's options, set the way deployments set them: through the environment.
 _GLOBAL = {"WATERFILL_LOAD_VIEW": "global"}
 _ALL = {"WATERFILL_CANDIDATES": "all"}
 CASES += [
