@@ -253,18 +253,24 @@ class MoELoadBalancer:
         *,
         num_logical_experts: int,
         num_layers: int,
+        placement_policy: str | None = None,
     ) -> PlacementPlan | None:
-        """The configured L1 policy's placement before any statistics exist.
+        """An L1 policy's placement before any statistics exist.
 
-        None when no placement policy is configured or the policy has no
-        layout of its own; the framework then keeps its default initial
-        placement. The returned plan is uncommitted, exactly like
-        :meth:`plan_placement`'s.
+        ``placement_policy`` defaults to the configured one, as in
+        :meth:`requires_per_source_rank_statistics`, so a framework that
+        selects its L1 policy separately from the routing pipeline (vLLM) can
+        ask for the policy it will run. None when no placement policy is
+        configured or the policy has no layout of its own; the framework then
+        keeps its default initial placement. The returned plan is uncommitted,
+        exactly like :meth:`plan_placement`'s.
         """
 
-        if self._configured_placement_policy.is_disabled:
-            return None
-        planner = self._placement_planner(self._configured_placement_policy.name)
+        if placement_policy is None:
+            if self._configured_placement_policy.is_disabled:
+                return None
+            placement_policy = self._configured_placement_policy.name
+        planner = self._placement_planner(placement_policy)
         if not isinstance(planner, InitialPlacementPlanner):
             return None
         return planner.initial_plan(

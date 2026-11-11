@@ -290,6 +290,31 @@ def test_load_balancer_initial_placement_comes_from_the_configured_policy():
 
 
 @pytest.mark.unit
+def test_initial_placement_can_name_its_policy():
+    """A framework that selects its L1 policy separately from the routing
+    pipeline (vLLM's UltraEP placement with static routing) names it."""
+    from evenmoe import MoELoadBalancer
+
+    static = MoELoadBalancer(routing_pipeline="static")
+    assert static.plan_initial_placement(_topology(), num_logical_experts=8, num_layers=1) is None
+    plan = static.plan_initial_placement(
+        _topology(), num_logical_experts=8, num_layers=1, placement_policy="ultraep"
+    )
+    assert plan is not None
+    assert plan.physical_to_logical_map[0].tolist() == [0, 1, 2, 3, 0, 1, 4, 5, 6, 7, 4, 5]
+    assert (
+        static.plan_initial_placement(
+            _topology(), num_logical_experts=8, num_layers=1, placement_policy="deepseek"
+        )
+        is None
+    )
+    with pytest.raises(ValueError, match="Unknown placement policy"):
+        static.plan_initial_placement(
+            _topology(), num_logical_experts=8, num_layers=1, placement_policy="nope"
+        )
+
+
+@pytest.mark.unit
 def test_per_source_rank_statistics_follow_the_placement_policy():
     """Declared by the L1 policy, so it holds however the routing pipeline is
     configured, including vLLM's UltraEP placement with static routing."""
