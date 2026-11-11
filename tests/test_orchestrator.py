@@ -432,14 +432,14 @@ def _waterfill_mlb(shared, collectives=None, a2a_backend=None, pipeline=(_GLOBAL
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("candidates", [None, "routed", "all"])
-def test_default_and_local_waterfill_issue_no_collective(caplog, candidates):
-    metadata = {} if candidates is None else {"candidates": candidates}
+@pytest.mark.parametrize("candidates", ["routed", "all"])
+def test_local_waterfill_issues_no_collective(caplog, candidates):
     shared = _SharedRouter([])
     collectives = _RecordingCollectives(torch.tensor([1, 1, 0, 3]))
-    mlb = _waterfill_mlb(
-        shared, collectives, pipeline=(RoutingPolicyConfig(name="waterfill", metadata=metadata),)
+    config = RoutingPolicyConfig(
+        name="waterfill", metadata={"load_view": "local", "candidates": candidates}
     )
+    mlb = _waterfill_mlb(shared, collectives, pipeline=(config,))
 
     with caplog.at_level("WARNING", logger="evenmoe"):
         mlb.route_tokens(_waterfill_request())
@@ -451,11 +451,28 @@ def test_default_and_local_waterfill_issue_no_collective(caplog, candidates):
 
 
 @pytest.mark.unit
-def test_default_waterfill_needs_no_collectives_adapter():
+def test_default_waterfill_gathers_the_global_view(caplog):
+    shared = _SharedRouter([])
+    collectives = _RecordingCollectives(torch.tensor([1, 1, 0, 3]))
+    mlb = _waterfill_mlb(
+        shared, collectives, a2a_backend=A2A_DEEPEP, pipeline=(RoutingPolicyConfig(name="waterfill"),)
+    )
+
+    with caplog.at_level("WARNING", logger="evenmoe"):
+        mlb.route_tokens(_waterfill_request())
+
+    assert len(collectives.payloads) == 1
+    assert shared.seen_active is not None
+    assert not caplog.records
+
+
+@pytest.mark.unit
+def test_default_waterfill_falls_back_to_local_without_collectives_adapter():
     shared = _SharedRouter([])
 
     _waterfill_mlb(shared, pipeline="waterfill").route_tokens(_waterfill_request())
 
+    assert torch.equal(shared.seen_rank_load, torch.tensor([1, 3]))
     assert shared.seen_active is None
 
 

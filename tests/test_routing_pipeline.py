@@ -272,17 +272,25 @@ def _options(config=None):
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize(
-    "algorithm", ["waterfill", "dynamic+waterfill", "lplb+waterfill", "ultraep+waterfill"]
-)
-def test_waterfill_defaults_to_local_view_with_routed_candidates(algorithm, caplog):
+@pytest.mark.parametrize("algorithm", ["waterfill", "dynamic+waterfill", "ultraep+waterfill"])
+def test_waterfill_defaults_to_global_view_with_routed_candidates(algorithm, caplog):
     with caplog.at_level("WARNING", logger="evenmoe"):
         waterfill = _waterfill_spec(RoutingPipeline.from_value(algorithm))
 
+    assert waterfill.rank_load == "global"
+    assert waterfill.reads_global_view
+    assert _options() == ("global", "routed")
+    assert not caplog.records
+
+
+@pytest.mark.unit
+def test_default_waterfill_after_lplb_uses_the_local_view(caplog):
+    with caplog.at_level("WARNING", logger="evenmoe"):
+        waterfill = _waterfill_spec(RoutingPipeline.from_value("lplb+waterfill"))
+
     assert waterfill.rank_load == "local"
     assert not waterfill.reads_global_view
-    assert _options() == ("local", "routed")
-    assert not caplog.records
+    assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 1
 
 
 @pytest.mark.unit

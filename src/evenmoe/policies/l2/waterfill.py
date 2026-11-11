@@ -10,14 +10,14 @@ independent options shape it.
 
 ``load_view`` -- which per-rank load the weights are computed from:
 
-- ``local`` (default): this rank's own routed load. No collective.
-- ``global``: the EP-wide routed load plus every rank's active token count,
-  gathered by the orchestrator with one int64 all-reduce (2 x EP values) per
-  MoE layer. It falls back to ``local`` with one warning when the collective
+- ``global`` (default): the EP-wide routed load plus every rank's active
+  token count, gathered by the orchestrator with one int64 all-reduce
+  (2 x EP values) per MoE layer. It falls back to ``local`` with one warning when the collective
   cannot run safely: after LPLB (not every rank is guaranteed to enter LPLB's
   collective, so a second one could hang), with no ``RoutingCollectives`` and
   EP size > 1, with no committed placement, or on an A2A backend that may skip
   routing on ranks without tokens (MegaMoE). The fallback keeps ``candidates``.
+- ``local``: this rank's own routed load. No collective.
 
 ``candidates`` -- which ranks may receive a token's shared expert:
 
@@ -74,7 +74,7 @@ from evenmoe.kernels.ops.waterfill import waterfill_select
 
 LOAD_VIEWS = ("local", "global")
 CANDIDATE_SETS = ("routed", "all")
-DEFAULT_LOAD_VIEW = "local"
+DEFAULT_LOAD_VIEW = "global"
 DEFAULT_CANDIDATES = "routed"
 
 # The deployment-wide settings; RoutingPolicyConfig.metadata overrides them.

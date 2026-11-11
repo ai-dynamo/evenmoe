@@ -58,17 +58,19 @@ Waterfill picks one EP rank per token for its shared-expert row. Two independent
 
 | Option | Environment variable | Values | Default | Meaning |
 |:---|:---|:---|:---|:---|
-| Load view | `WATERFILL_LOAD_VIEW` | `local` / `global` | `local` | `local` balances against this rank's own routed load, with no collective. `global` all-reduces every rank's routed load and token count once per MoE layer (2 × EP int64 values). |
+| Load view | `WATERFILL_LOAD_VIEW` | `global` / `local` | `global` | `global` all-reduces every rank's routed load and token count once per MoE layer (2 × EP int64 values). `local` balances against this rank's own routed load, with no collective. |
 | Candidate set | `WATERFILL_CANDIDATES` | `routed` / `all` | `routed` | `routed` keeps the shared row on the source rank or a rank the token's routed experts already go to, so it adds no new dispatch destination. `all` allows any rank. |
 
-Set them in the serving framework's environment (every server process inherits them) to choose one of four combinations. Measured on DeepSeek-V3, 8 × H20, SGLang prefill, three rounds, change versus EPLB (same-domain GSM8K / MMLU; cross-domain GSM8K / MMLU):
+Set them in the serving framework's environment (every server process inherits them). Prefill throughput change versus EPLB, 8 × H20, SGLang TP8/EP8 + DeepEP, 32 redundant experts, three rounds; each cell is same-domain GSM8K / MMLU, then cross-domain GSM8K / MMLU:
 
-| Combination | Environment | Prefill vs EPLB | When to use |
+| Combination | Environment | DeepSeek-V3 | GLM-5.3 |
 |:---|:---|:---|:---|
-| `local` + `routed` (default) | *(none)* | −0.39% / −0.32%; +3.93% / +3.18% | Most deployments, and any decode instance. No collective, works with every L2 pipeline and A2A backend. |
-| `global` + `routed` | `WATERFILL_LOAD_VIEW=global` | +0.35% / +0.12%; +4.30% / +3.86% | Fastest for prefill-only instances on DeepEP. The per-layer all-reduce costs decode: on GLM-5.3 at concurrency 8 / 64 it raised TPOT 9–12% over EPLB, against 5% for `local` + `all`. Does not combine with LPLB (see below). |
-| `local` + `all` | `WATERFILL_CANDIDATES=all` | −0.7% / −0.6%; +4.0% / +3.2% | Reproducing results from before `routed` became the default. |
-| `global` + `all` | `WATERFILL_LOAD_VIEW=global WATERFILL_CANDIDATES=all` | not yet benchmarked | Same constraints as `global` + `routed`; lets the shared row go to any rank. |
+| `global` + `routed` (default) | *(none)* | +0.31% / +0.06%; +4.32% / +3.89% | +1.16% / +0.80%; +4.37% / +4.49% |
+| `global` + `all` | `WATERFILL_CANDIDATES=all` | +0.25% / −0.08%; +4.32% / +3.89% | +1.14% / +0.71%; +4.34% / +4.48% |
+| `local` + `routed` | `WATERFILL_LOAD_VIEW=local` | −0.28% / −0.25%; +4.01% / +3.27% | −0.08% / −0.04%; +3.79% / +3.60% |
+| `local` + `all` | `WATERFILL_LOAD_VIEW=local WATERFILL_CANDIDATES=all` | −0.57% / −0.60%; +4.03% / +3.30% | −0.50% / −0.34%; +3.93% / +3.67% |
+
+The load view carries the gain; the candidate set matters only under `local` (about +0.3% same-domain for `routed`). Waterfill slows decode in every combination, because it fuses the shared expert into the routed GEMM. Small-batch TPOT on GLM-5.3, versus EPLB at concurrency 8 / 64: +12.3% / +9.4% for `global` + `routed`, +8.0% / +6.0% for `local` + `routed`, +5.5% / +5.6% for `local` + `all`. Enable Waterfill on prefill instances only.
 
 `global` falls back to `local`, keeping the candidate set, and logs one warning when its collective cannot run safely: after LPLB (for example `lplb+waterfill`), when the framework passes no `collectives` and EP > 1, when no committed placement is available, and on the MegaMoE A2A backend.
 
@@ -107,7 +109,7 @@ Placement is recorded once per dataset. **Same-domain** serves the dataset its p
 
 Each workload used 1,000 prompts with ~1K-token inputs, concurrency 256, and `max_tokens=1` (prefill-only); values are the median of three measured rounds.
 
-The Waterfill rows were measured with `candidates=all`, the default before `routed`. In a later run of the same setup (DeepSeek-V3, three rounds, change versus EPLB), `local`+`routed` measured −0.39% / −0.32% same-domain and +3.93% / +3.18% cross-domain (GSM8K / MMLU), against −0.7% / −0.6% and +4.0% / +3.2% for `local`+`all` and +0.35% / +0.12% and +4.30% / +3.86% for `global`+`routed`.
+The Waterfill rows were measured with `local` + `all`, the default at the time. See [Waterfill options](#waterfill-options) for all four combinations, including the current default `global` + `routed`.
 
 ## Quick Start
 
