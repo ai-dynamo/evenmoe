@@ -146,7 +146,8 @@ def test_tile_mode_capabilities_knobs_and_composition(monkeypatch):
     monkeypatch.setenv("EVENMOE_WATERFILL_TILE_ROWS", "24")
     monkeypatch.setenv("EVENMOE_WATERFILL_TILE_RHO", "1.25")
     spec = ROUTING_POLICY.resolve(RoutingPolicyConfig("waterfill"))
-    assert spec.rank_load is None
+    assert spec.rank_load is None and spec.requires_placement_state  # so the framework calls prepare_layer
+    assert RoutingPipeline.from_value("static+waterfill").capabilities.requires_placement_state
     assert spec.supported_a2a_backends == ("deepep", "megamoe") and not spec.supports_concurrent_microbatches
     for algorithm in ("static+waterfill", "lplb+waterfill"):
         RoutingPipeline.from_value(algorithm)

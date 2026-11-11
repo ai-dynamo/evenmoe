@@ -36,6 +36,7 @@ call, idle ranks included (with an empty batch).
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, replace
 from functools import partial
@@ -54,6 +55,8 @@ from evenmoe.core.types import (
     RoutingRequest,
 )
 from evenmoe.kernels.ops.waterfill import waterfill_select
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -220,6 +223,7 @@ def _configure(config: RoutingPolicyConfig) -> RoutingPolicySpec:
         return replace(
             ROUTING_POLICY,
             rank_load=None,  # counts the routed physical ids itself
+            requires_placement_state=True,  # the framework calls prepare_layer, which sets up P2P
             supported_a2a_backends=(A2A_DEEPEP, A2A_MEGAMOE),
             incompatible_with=frozenset({"ultraep"}),  # not validated with tile mode
             supports_concurrent_microbatches=False,  # one P2P epoch per process
@@ -268,6 +272,7 @@ class _TileWaterfill:
         self._process_group = process_group
         self._collectives = collectives
         self._set_up = False
+        self._warned = False
         self.peer_exchange: Any = None  # NVLink P2P buffers; None = the framework all-reduce
 
     def set_up_exchange(self) -> None:
@@ -291,6 +296,12 @@ class _TileWaterfill:
             physical, self.num_ranks * self.experts_per_rank, request.token_count, tile_rows, self.peer_exchange
         )
         if status is None and self.num_ranks > 1:
+            if not self._set_up and not self._warned:
+                self._warned = True
+                logger.warning(
+                    "waterfill tile mode: prepare_layer was not called before routing, so the count "
+                    "exchange uses the framework all-reduce instead of NVLink P2P."
+                )
             if self._collectives is None:
                 raise RuntimeError("waterfill tile mode needs RoutingCollectives (or P2P) for more than one rank.")
             # All-gather as one sum all-reduce of a zeroed [R, W] payload (exact in fp32 below 2**24).
