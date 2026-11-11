@@ -165,6 +165,21 @@ def test_empty_routing_still_reaches_pipeline(engine):
     ctx.resources.expert_distribution_recorder.on_select_experts.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("sglang_backend", "expected"),
+    [(None, None), ("deepep", "deepep"), ("megamoe", "megamoe"), ("flashinfer", None)],
+)
+def test_load_balancer_kwargs_carry_the_a2a_backend(engine, sglang_backend, expected):
+    _, ctx = engine
+    if sglang_backend is not None:
+        ctx.config_bag("exec").moe.moe_a2a_backend = sglang_backend
+
+    kwargs = to_load_balancer_kwargs(ctx)
+
+    assert kwargs["a2a_backend"] == expected
+    assert MoELoadBalancer.from_algorithm(**kwargs)._a2a_backend == expected
+
+
 def test_missing_committed_metadata_fails_at_routing_not_construction(engine):
     _mlb, ctx = engine
     ctx.resources.expert_location_metadata = None

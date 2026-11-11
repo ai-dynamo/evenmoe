@@ -72,12 +72,14 @@ class _SGLangCollectives:
 def to_load_balancer_kwargs(context: RuntimeContext) -> dict:
     """Translate engine configuration to the generic EvenMoE constructor arguments."""
     layout = placement_adapter._expert_layout(context)
+    moe = context.config_bag("exec").moe
     return {
-        "algorithm": context.config_bag("exec").moe.moe_load_balancer_algorithm,
+        "algorithm": moe.moe_load_balancer_algorithm,
         "ep_size": layout["ep_size"],
         "source_rank": context.parallel.moe_ep_rank,
         "experts_per_rank": layout["num_local_physical_experts"],
         "collectives": _SGLangCollectives(context),
+        "a2a_backend": a2a_backend_from_sglang(getattr(moe, "moe_a2a_backend", None)),
     }
 
 

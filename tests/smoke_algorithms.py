@@ -116,7 +116,11 @@ def _tolist(value):
 
 
 def _run(expression: str, env: dict[str, str]) -> dict:
-    for key in ("LPLB_USE_LOCAL_COUNT", "WATERFILL_USE_GLOBAL_LOAD"):
+    for key in (
+        "LPLB_USE_LOCAL_COUNT",
+        "WATERFILL_LOAD_VIEW",
+        "WATERFILL_CANDIDATES",
+    ):
         os.environ.pop(key, None)
     os.environ.update(env)
     torch.manual_seed(0)
@@ -185,23 +189,15 @@ CASES = [
     ("invalid unknown", "unknown", {}),
 ]
 
-# Global Waterfill was spelled ``waterfill_dynamic`` before the refactor and is
-# an environment switch after it; run whichever this tree understands.
-try:
-    MoELoadBalancer.from_algorithm(
-        "dynamic+waterfill_dynamic", ep_size=2, source_rank=0, experts_per_rank=3
-    )
-    CASES.append(("global waterfill", "dynamic+waterfill_dynamic", {}))
-    CASES.append(("global waterfill after lplb (must fail)", "lplb+waterfill_dynamic", {}))
-except ValueError:
-    CASES.append(("global waterfill", "dynamic+waterfill", {"WATERFILL_USE_GLOBAL_LOAD": "1"}))
-    CASES.append(
-        (
-            "global waterfill after lplb (must fail)",
-            "lplb+waterfill",
-            {"WATERFILL_USE_GLOBAL_LOAD": "1"},
-        )
-    )
+# Waterfill's options, set the way deployments set them: through the environment.
+_GLOBAL = {"WATERFILL_LOAD_VIEW": "global"}
+_ALL = {"WATERFILL_CANDIDATES": "all"}
+CASES += [
+    ("global waterfill", "dynamic+waterfill", _GLOBAL),
+    ("global waterfill after lplb (falls back to local)", "lplb+waterfill", _GLOBAL),
+    ("waterfill all ranks", "dynamic+waterfill", _ALL),
+    ("global waterfill all ranks", "dynamic+waterfill", {**_GLOBAL, **_ALL}),
+]
 
 results = {label: _run(expr, env) for label, expr, env in CASES}
 json.dump(results, sys.stdout, indent=1, sort_keys=True)
