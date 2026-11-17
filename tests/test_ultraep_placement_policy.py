@@ -315,23 +315,72 @@ def test_initial_placement_can_name_its_policy():
 
 
 @pytest.mark.unit
-def test_per_source_rank_statistics_follow_the_placement_policy():
+def test_from_algorithm_sets_the_default_placement_policy():
+    """vLLM picks UltraEP placement separately from static routing; the factory
+    takes it as the default L1 policy."""
+    from evenmoe import MoELoadBalancer
+
+    def build(algorithm, **kwargs):
+        return MoELoadBalancer.from_algorithm(
+            algorithm, ep_size=2, source_rank=0, experts_per_rank=4, **kwargs
+        )
+
+    mlb = build("static", placement_policy="ultraep")
+    assert mlb.placement_policy == "ultraep"
+    assert mlb.placement_logical_count() == "per_source_rank"
+    assert mlb.plan_initial_placement(_topology(), num_logical_experts=8, num_layers=1) is not None
+
+    omitted = build("static")
+    assert omitted.placement_policy is None
+    assert omitted.placement_logical_count() == "global"
+    assert omitted.plan_initial_placement(_topology(), num_logical_experts=8, num_layers=1) is None
+
+    with pytest.raises(ValueError, match="requires placement policy 'ultraep'"):
+        build("ultraep", placement_policy="deepseek")
+
+
+@pytest.mark.unit
+def test_placement_logical_count_follows_the_placement_policy():
     """Declared by the L1 policy, so it holds however the routing pipeline is
     configured, including vLLM's UltraEP placement with static routing."""
     from evenmoe import MoELoadBalancer
 
-    assert MoELoadBalancer(routing_pipeline="ultraep").requires_per_source_rank_statistics()
-    assert MoELoadBalancer(
-        routing_pipeline="ultraep+waterfill"
-    ).requires_per_source_rank_statistics()
-    assert MoELoadBalancer(placement_policy="ultraep").requires_per_source_rank_statistics()
-    assert not MoELoadBalancer(placement_policy="deepseek").requires_per_source_rank_statistics()
-    assert not MoELoadBalancer().requires_per_source_rank_statistics()
+    assert MoELoadBalancer(routing_pipeline="ultraep").placement_logical_count() == (
+        "per_source_rank"
+    )
+    assert MoELoadBalancer(routing_pipeline="ultraep+waterfill").placement_logical_count() == (
+        "per_source_rank"
+    )
+    assert MoELoadBalancer(placement_policy="ultraep").placement_logical_count() == (
+        "per_source_rank"
+    )
+    assert MoELoadBalancer(placement_policy="deepseek").placement_logical_count() == "global"
+    assert MoELoadBalancer().placement_logical_count() == "global"
     # A framework that picks its L1 policy separately can name it.
-    assert MoELoadBalancer().requires_per_source_rank_statistics("ultraep")
-    assert not MoELoadBalancer().requires_per_source_rank_statistics("deepseek")
+    assert MoELoadBalancer().placement_logical_count("ultraep") == "per_source_rank"
+    assert MoELoadBalancer().placement_logical_count("deepseek") == "global"
     with pytest.raises(ValueError, match="Unknown placement policy"):
-        MoELoadBalancer().requires_per_source_rank_statistics("nope")
+        MoELoadBalancer().placement_logical_count("nope")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("view", ["local", None, "per_rank"])
+def test_placement_logical_count_rejects_an_unknown_l1_view(view):
+    from evenmoe import MoELoadBalancer
+
+    class _Planner:
+        logical_count = view
+
+        def plan(self, request):
+            raise AssertionError("not reached")
+
+    mlb = MoELoadBalancer(placement_planners={"custom": _Planner()})
+    with pytest.raises(ValueError, match="declares logical_count"):
+        mlb.placement_logical_count("custom")
+    with pytest.raises(ValueError, match="declares logical_count"):
+        mlb.aggregate_logical_count(
+            torch.zeros((1, 8), dtype=torch.int32), ep_size=1, placement_policy="custom"
+        )
 
 
 @pytest.mark.unit

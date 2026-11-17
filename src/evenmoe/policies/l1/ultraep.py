@@ -36,7 +36,7 @@ class UltraEPPlacementPolicy(PlacementPlanner):
     """Compute replica placement from per-rank logical expert loads."""
 
     name = "ultraep"
-    requires_per_source_rank_statistics = True
+    logical_count = "per_source_rank"
 
     def __init__(
         self,

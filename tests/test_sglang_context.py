@@ -11,12 +11,12 @@ from evenmoe import MoELoadBalancer, PlacementPlan, RoutingDecision, RoutingPipe
 from evenmoe.adapters.sglang import (
     placement,
     plan_initial_placement,
-    plan_layer_from_topk,
     to_deployment_config,
     to_load_balancer_kwargs,
     to_placement_request,
     to_placement_snapshot,
     to_routing_request,
+    to_sglang_maps,
     to_sglang_routing_output,
 )
 
@@ -352,57 +352,16 @@ class _TwoRankCollectives:
         return payload + peer
 
 
-class _RecordingPlanner:
-    def __init__(self, plan, per_rank):
-        self.result = plan
-        self.requires_per_source_rank_statistics = per_rank
-        self.requests = []
-
-    def plan(self, request):
-        self.requests.append(request)
-        return self.result
-
-
-def _layer_mlb(plan, per_rank=True):
-    """A balancer whose ``deepseek`` planner (the context's eplb_algorithm)
-    records its request, with a two-rank collective."""
-    planner = _RecordingPlanner(plan, per_rank)
-    collectives = _TwoRankCollectives()
-    mlb = MoELoadBalancer(placement_planners={"deepseek": planner}, collectives=collectives)
-    return mlb, planner, collectives
-
-
-def test_layer_plan_gathers_every_rank_and_keys_routing_state_by_layer(engine):
+def test_one_layer_request_needs_no_statistics(engine):
     _, ctx = engine
-    quota = torch.tensor([[[1, 2], [2, 3]]], dtype=torch.int32)
-    plan = PlacementPlan(
-        physical_to_logical_map=torch.tensor([[0, 1, 0, 1]], dtype=torch.int32),
-        logical_to_all_physical_map=torch.tensor([[[0, 2], [1, 3]]], dtype=torch.int32),
-        logical_to_physical_count=torch.tensor([[2, 2]], dtype=torch.int32),
-        metadata={"rank_quota_prefix": quota},
-    )
-    mlb, planner, collectives = _layer_mlb(plan)
-
-    maps = plan_layer_from_topk(mlb, ctx, 5, torch.tensor([[0, 0], [1, -1]]))
-
-    # This rank contributes only its own row, flattened so a framework
-    # all-reduce cannot take it for [tokens, hidden]; padding (-1) is not counted.
-    assert collectives.payloads[0].tolist() == [2, 1, 0, 0]
-    (request,) = planner.requests
+    request = to_placement_request(context=ctx)
+    assert request.stats.logical_count is None
     assert request.policy.name == "deepseek"
-    assert request.stats.logical_count.tolist() == [[[2, 1]], [[0, 1]]]
-    assert list(maps.routing_metadata) == [5]
-    assert maps.routing_metadata[5]["rank_quota_prefix"].data_ptr() == quota[0].data_ptr()
-    assert maps.physical_to_logical_map is plan.physical_to_logical_map
+    assert request.topology.num_physical_experts == 4
+    assert request.topology.num_local_physical_experts == 2
 
 
-def test_layer_plan_without_routing_state_publishes_none(engine):
-    _, ctx = engine
-    mlb, _, _ = _layer_mlb(_SINGLE_LAYER_PLAN)
-    maps = plan_layer_from_topk(mlb, ctx, 3, torch.tensor([[0, 1]]))
-    assert maps.routing_metadata == {}
-
-
+_QUOTA = torch.tensor([[[1, 2], [2, 3]]], dtype=torch.int32)
 _SINGLE_LAYER_PLAN = PlacementPlan(
     physical_to_logical_map=torch.tensor([[0, 1, 0, 1]], dtype=torch.int32),
     logical_to_all_physical_map=torch.tensor([[[0, 2], [1, 3]]], dtype=torch.int32),
@@ -410,16 +369,34 @@ _SINGLE_LAYER_PLAN = PlacementPlan(
 )
 
 
-def test_layer_plan_sums_ranks_for_a_policy_without_per_rank_statistics(engine):
-    _, ctx = engine
-    mlb, planner, collectives = _layer_mlb(_SINGLE_LAYER_PLAN, per_rank=False)
+def test_single_layer_maps_key_routing_state_by_model_layer():
+    plan = PlacementPlan(
+        physical_to_logical_map=_SINGLE_LAYER_PLAN.physical_to_logical_map,
+        logical_to_all_physical_map=_SINGLE_LAYER_PLAN.logical_to_all_physical_map,
+        logical_to_physical_count=_SINGLE_LAYER_PLAN.logical_to_physical_count,
+        metadata={"rank_quota_prefix": _QUOTA},
+    )
 
-    plan_layer_from_topk(mlb, ctx, 3, torch.tensor([[0, 0], [1, -1]]))
+    maps = to_sglang_maps(plan, layer_id=5)
 
-    # Only this rank's [experts] vector goes over the wire, not a [ranks, experts] matrix.
-    assert [p.tolist() for p in collectives.payloads] == [[2, 1]]
-    (request,) = planner.requests
-    assert request.stats.logical_count.tolist() == [[[2, 2]]]
+    assert list(maps.routing_metadata) == [5]
+    assert maps.routing_metadata[5]["rank_quota_prefix"].data_ptr() == _QUOTA[0].data_ptr()
+    # The map tensors keep their leading dimension of 1.
+    assert maps.physical_to_logical_map is plan.physical_to_logical_map
+    # Without layer_id the plan's own layer index is kept.
+    assert list(to_sglang_maps(plan).routing_metadata) == [0]
+    # A plan without routing state publishes none.
+    assert to_sglang_maps(_SINGLE_LAYER_PLAN, layer_id=3).routing_metadata == {}
+
+
+def test_layer_id_requires_a_single_layer_plan():
+    two_layers = PlacementPlan(
+        physical_to_logical_map=torch.zeros((2, 4), dtype=torch.int32),
+        logical_to_all_physical_map=torch.zeros((2, 2, 2), dtype=torch.int32),
+        logical_to_physical_count=torch.ones((2, 2), dtype=torch.int32),
+    )
+    with pytest.raises(ValueError, match="single-layer plan"):
+        to_sglang_maps(two_layers, layer_id=1)
 
 
 class _UltraEPBackend:
@@ -446,11 +423,12 @@ class _UltraEPBackend:
         ("static", "ultraep", None),
     ],
 )
-def test_layer_plan_hands_ultraep_its_own_rank_and_every_rank_row(
+def test_layer_refresh_hands_ultraep_its_own_rank_and_every_rank_row(
     engine, routing, eplb_algorithm, configured
 ):
-    """Through the real UltraEP L1 policy: the rank SGLang names in the policy
-    metadata and the row this rank fills in the gather are the same rank."""
+    """SGLang's per-layer refresh, composed as it does it, through the real
+    UltraEP L1 policy: the rank SGLang names in the policy metadata and the row
+    this rank fills in the gather are the same rank."""
     from evenmoe.policies.l1.ultraep import UltraEPPlacementPolicy
 
     _, ctx = engine
@@ -464,7 +442,10 @@ def test_layer_plan_hands_ultraep_its_own_rank_and_every_rank_row(
         collectives=_TwoRankCollectives(rank=1),
     )
 
-    maps = plan_layer_from_topk(mlb, ctx, 7, torch.tensor([[0, 0], [0, -1]]))
+    plan = mlb.plan_layer_placement(
+        to_placement_request(context=ctx), torch.tensor([3, 0], dtype=torch.int32)
+    )
+    maps = to_sglang_maps(plan, layer_id=7)
 
     (call,) = backend.calls
     assert call["rank"] == 1
@@ -473,6 +454,60 @@ def test_layer_plan_hands_ultraep_its_own_rank_and_every_rank_row(
     assert maps.physical_to_logical_map.tolist() == [[0, 0, 1, 1]]
     assert list(maps.routing_metadata) == [7]
     assert maps.routing_metadata[7]["rank_quota_prefix"].unique().tolist() == [7]
+
+
+# Every value SGLang's --eplb-algorithm takes: "auto" (the default) and the
+# EplbAlgorithm names compute_algorithm accepts.
+_SGLANG_EPLB_ALGORITHMS = (
+    "auto",
+    "deepseek",
+    "deepseek_hierarchical",
+    "deepseek_vec",
+    "deepseek_vec_hierarchical",
+    "elasticity_aware",
+    "elasticity_aware_hierarchical",
+)
+
+
+@pytest.mark.parametrize(
+    "routing, eplb_algorithm, expected",
+    [
+        # UltraEP routing runs its own placement whatever --eplb-algorithm says.
+        ("ultraep", "deepseek", "ultraep"),
+        ("ultraep", "auto", "ultraep"),
+        ("ultraep+waterfill", "deepseek_hierarchical", "ultraep"),
+        ("static", "deepseek", "deepseek"),
+        ("static", "auto", "auto"),
+        ("lplb", "auto", "auto"),
+        ("static", "ultraep", "ultraep"),
+    ],
+)
+def test_balancer_default_l1_is_the_policy_sglang_runs(engine, routing, eplb_algorithm, expected):
+    _, ctx = engine
+    moe = ctx.config_bag("exec").moe
+    moe.moe_load_balancer_algorithm = routing
+    moe.eplb_algorithm = eplb_algorithm
+
+    kwargs = to_load_balancer_kwargs(ctx)
+    # One resolution for construction and for every placement request.
+    assert kwargs["placement_policy"] == expected
+    assert to_placement_request(context=ctx).policy.name == expected
+    # The constructor's L1/L2 compatibility check accepts it.
+    mlb = MoELoadBalancer.from_algorithm(**kwargs)
+    assert mlb.placement_policy == expected
+
+
+@pytest.mark.parametrize("eplb_algorithm", _SGLANG_EPLB_ALGORITHMS)
+def test_every_sglang_eplb_algorithm_is_a_registered_placement_policy(engine, eplb_algorithm):
+    """Each is a registered planner with no initial layout and the global view,
+    so making it the balancer's default L1 changes nothing SGLang observes."""
+    _, ctx = engine
+    ctx.config_bag("exec").moe.eplb_algorithm = eplb_algorithm
+    mlb = MoELoadBalancer.from_algorithm(**to_load_balancer_kwargs(ctx))
+
+    assert mlb.placement_policy == eplb_algorithm
+    assert mlb.placement_logical_count() == "global"
+    assert plan_initial_placement(mlb, ctx, num_layers=2) is None
 
 
 def test_deployment_config_lets_ultraep_report_its_layout_at_startup(engine):

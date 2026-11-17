@@ -53,7 +53,7 @@ def to_placement_request(
     per-rank breakdown instead:
     ``[num_ranks, num_moe_layers, num_logical_experts]``.  The caller selects
     which of the two to pass by
-    ``MoELoadBalancer.requires_per_source_rank_statistics(algorithm)``.
+    ``MoELoadBalancer.placement_logical_count(algorithm)``.
 
     ``num_replicas`` is vLLM's name for the total physical expert slot count;
     ``num_ranks`` is the EP world size.  EvenMoE's topology is expressed in terms

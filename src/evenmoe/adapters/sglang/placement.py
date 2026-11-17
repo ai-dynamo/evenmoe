@@ -4,10 +4,8 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
-
-import torch
 
 from evenmoe.core.types import (
     PlacementPlan,
@@ -55,6 +53,16 @@ def _expert_layout(context: RuntimeContext):
     }
 
 
+def _placement_policy_name(context: RuntimeContext) -> str:
+    """The L1 policy SGLang runs: the one the routing pipeline requires
+    (UltraEP's own placement), otherwise ``--eplb-algorithm``."""
+    from evenmoe.core.routing_pipeline import RoutingPipeline
+
+    moe = context.config_bag("exec").moe
+    pipeline = RoutingPipeline.from_value(moe.moe_load_balancer_algorithm)
+    return pipeline.placement_policy or moe.eplb_algorithm
+
+
 def _placement(context: RuntimeContext):
     metadata = context.resources.expert_location_metadata
     if metadata is None:
@@ -79,8 +87,8 @@ class SGLangPlacementMaps:
 
     The map tensors and ``routing_metadata`` are indexed by the layers of the
     plan they came from, which are model layer ids for a whole-model plan.
-    :func:`plan_layer_from_topk` re-keys its single layer's ``routing_metadata``
-    to the model layer id.
+    ``to_sglang_maps(plan, layer_id=...)`` re-keys a single-layer plan's
+    ``routing_metadata`` to the model layer id.
     """
 
     physical_to_logical_map: TensorLike
@@ -90,7 +98,7 @@ class SGLangPlacementMaps:
 
 
 def to_placement_request(
-    logical_count: TensorLike,
+    logical_count: TensorLike | None = None,
     *,
     context: RuntimeContext | None = None,
     num_physical_experts: int | None = None,
@@ -105,9 +113,12 @@ def to_placement_request(
 
     SGLang must perform recording, dump, physical-to-logical aggregation,
     EP aggregation and threshold gating before calling this function. A policy
-    for which ``mlb.requires_per_source_rank_statistics()`` holds needs one
-    logical-count sample per source EP rank. For a per-layer refresh from live
-    TopK, :func:`plan_layer_from_topk` does the counting and EP aggregation.
+    whose ``mlb.placement_logical_count()`` is ``"per_source_rank"`` needs one
+    logical-count sample per source EP rank.
+
+    For a per-layer refresh, omit ``logical_count`` and hand the one-layer
+    request to :meth:`MoELoadBalancer.plan_layer_placement`, which combines
+    this rank's counts over the EP group and supplies the statistics.
 
     Context supplies omitted layout and policy values. Explicit arguments,
     such as ``num_nodes=1`` for flat topology, take precedence.
@@ -129,11 +140,7 @@ def to_placement_request(
         if num_nodes is None:
             num_nodes = context.parallel.nnodes
         if algorithm is None:
-            from evenmoe.core.routing_pipeline import RoutingPipeline
-
-            moe = context.config_bag("exec").moe
-            pipeline = RoutingPipeline.from_value(moe.moe_load_balancer_algorithm)
-            algorithm = pipeline.placement_policy or moe.eplb_algorithm
+            algorithm = _placement_policy_name(context)
         if policy_metadata is None and algorithm == "ultraep":
             if layout["ep_size"] % context.parallel.nnodes != 0:
                 raise ValueError(
@@ -162,13 +169,21 @@ def to_placement_request(
     )
 
 
-def to_sglang_maps(plan: PlacementPlan) -> SGLangPlacementMaps:
-    """Translate an uncommitted EvenMoE plan into plain SGLang mapping tensors."""
+def to_sglang_maps(plan: PlacementPlan, *, layer_id: int | None = None) -> SGLangPlacementMaps:
+    """Translate an uncommitted EvenMoE plan into plain SGLang mapping tensors.
 
+    ``layer_id`` marks a single-layer plan, such as
+    :meth:`MoELoadBalancer.plan_layer_placement` returns, as that model layer:
+    the map tensors keep their leading dimension of 1, while
+    ``routing_metadata`` is keyed by ``layer_id`` so it can be published as is.
+    """
+
+    if layer_id is not None and plan.physical_to_logical_map.shape[0] != 1:
+        raise ValueError("layer_id applies only to a single-layer plan.")
     quota = plan.metadata.get("rank_quota_prefix")
     routing_metadata = (
         {
-            layer: {
+            layer if layer_id is None else layer_id: {
                 "logical_to_physical_candidates": plan.logical_to_all_physical_map[layer],
                 "logical_to_physical_count": plan.logical_to_physical_count[layer],
                 "rank_quota_prefix": quota[layer],
@@ -207,50 +222,6 @@ def plan_initial_placement(
         num_layers=num_layers,
     )
     return None if plan is None else to_sglang_maps(plan)
-
-
-def plan_layer_from_topk(
-    mlb: MoELoadBalancer,
-    context: RuntimeContext,
-    layer_id: int,
-    logical_topk_ids: TensorLike,
-) -> SGLangPlacementMaps:
-    """Re-plan one layer from the TopK it is about to route.
-
-    Counts this rank's logical TopK, combines the counts over the EP group
-    with :meth:`MoELoadBalancer.aggregate_logical_count` and plans that single
-    layer with the placement policy :func:`to_placement_request` resolves from
-    the context. That policy decides whether it gets every source rank's row
-    or the EP-wide sum. Every EP rank must call this together, since it runs
-    one collective through the balancer's ``RoutingCollectives``; SGLang
-    decides when, then moves the weights and commits the maps.
-
-    The returned maps describe this layer only: the three map tensors have a
-    leading dimension of 1 (index 0 is ``layer_id``), while ``routing_metadata``
-    is already keyed by ``layer_id`` so it can be published as is.
-    """
-
-    from evenmoe.kernels.ops.counting import count_logical_experts
-
-    num_logical_experts = int(context.resources.mlb_model_info["num_logical_experts"])
-    local_count = count_logical_experts(logical_topk_ids, num_logical_experts, dtype=torch.int32)
-    # Resolve the policy first: it decides how the counts are combined.
-    request = to_placement_request(local_count[None, None, :], context=context)
-    logical_count = mlb.aggregate_logical_count(
-        local_count[None, :],
-        ep_size=_expert_layout(context)["ep_size"],
-        placement_policy=PlacementPolicyConfig.from_value(request.policy).name,
-    )
-    plan = mlb.plan_placement(
-        replace(request, stats=PlacementStats(logical_count=logical_count))
-    )
-    maps = to_sglang_maps(plan)
-    # The request holds one layer, so its routing state sits under index 0.
-    routing_metadata = maps.routing_metadata.get(0)
-    return replace(
-        maps,
-        routing_metadata={} if routing_metadata is None else {layer_id: routing_metadata},
-    )
 
 
 def to_placement_snapshot(

@@ -105,10 +105,15 @@ def to_deployment_config(
 
 
 def to_load_balancer_kwargs(context: RuntimeContext) -> dict:
-    """Translate engine configuration to the generic EvenMoE constructor arguments."""
+    """Translate engine configuration to the generic EvenMoE constructor arguments.
+
+    ``placement_policy`` is the L1 policy SGLang runs, the same one
+    :func:`to_placement_request` names, so the balancer's default L1 matches it.
+    """
     layout = placement_adapter._expert_layout(context)
     return {
         "algorithm": context.config_bag("exec").moe.moe_load_balancer_algorithm,
+        "placement_policy": placement_adapter._placement_policy_name(context),
         "ep_size": layout["ep_size"],
         "source_rank": context.parallel.moe_ep_rank,
         "experts_per_rank": layout["num_local_physical_experts"],

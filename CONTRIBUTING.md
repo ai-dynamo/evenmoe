@@ -188,8 +188,8 @@ Two optional declarations let the framework ask the policy instead of special-ca
 
 | Declaration | When to add it | Framework entry point |
 |---|---|---|
-| Class attribute `requires_per_source_rank_statistics = True` | `plan()` solves from each source EP rank's own counts, so `request.stats.logical_count` is `[ranks, layers, logical_experts]` rather than summed over ranks | `MoELoadBalancer.requires_per_source_rank_statistics()` and `aggregate_logical_count()` |
-| Method `initial_plan(topology, *, num_logical_experts, num_layers)` (`InitialPlacementPlanner`) | The policy has its own placement before any statistics exist | `MoELoadBalancer.plan_initial_placement()`, which returns `None` for a policy without it |
+| Class attribute `logical_count = "per_source_rank"` (default `"global"`) | `plan()` solves from each source EP rank's own counts, so `request.stats.logical_count` is `[ep_size, layers, logical_experts]` rather than the `[1, layers, logical_experts]` EP-wide sum | `MoELoadBalancer.placement_logical_count()`, `aggregate_logical_count()` and `plan_layer_placement()` |
+| Optional method `initial_plan(topology, *, num_logical_experts, num_layers)` | The policy has its own placement before any statistics exist | `MoELoadBalancer.plan_initial_placement()`, which returns `None` for a policy without it |
 
 **Step 2: Follow Section 6.4 to add the algorithm to EvenMoE's default planner mapping.**
 

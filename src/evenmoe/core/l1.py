@@ -5,35 +5,35 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from evenmoe.core.types import PlacementPlan, PlacementRequest, PlacementTopology
+from evenmoe.core.types import PlacementPlan, PlacementRequest
+
+_L1_DATA_VIEWS = ("global", "per_source_rank")
 
 
 @runtime_checkable
 class PlacementPlanner(Protocol):
     """Framework-neutral L1 candidate-placement policy.
 
-    A planner that solves from each source EP rank's own TopK counts sets the
-    class attribute ``requires_per_source_rank_statistics = True``; its
-    ``request.stats.logical_count`` is then ``[ranks, layers, logical_experts]``
-    rather than summed over ranks. Absent means False. Frameworks read it
-    through :meth:`MoELoadBalancer.requires_per_source_rank_statistics`.
+    Two optional extensions let the framework ask the planner instead of
+    special-casing it.
+
+    The class attribute ``logical_count`` names the data view of
+    ``request.stats.logical_count`` the planner solves from, in the vocabulary
+    of :attr:`RoutingPolicySpec.logical_count`: ``"global"`` (the default when
+    absent) is the EP-wide sum, ``[1, layers, logical_experts]``;
+    ``"per_source_rank"`` is EP-wide but keeps the source-rank axis,
+    ``[ep_size, layers, logical_experts]``. ``ultraep`` declares
+    ``"per_source_rank"``: its solve also computes each source rank's
+    per-replica token quota (``rank_quota_prefix``) for its L2 half, filling
+    each replica from its host rank's own tokens first, so it needs to know
+    which rank the demand comes from. Frameworks read the view through
+    :meth:`MoELoadBalancer.placement_logical_count`.
+
+    The method ``initial_plan(topology, *, num_logical_experts, num_layers) ->
+    PlacementPlan`` returns the planner's own placement before any statistics
+    exist; :meth:`MoELoadBalancer.plan_initial_placement` calls it. Without it
+    the framework keeps its default initial placement.
     """
 
     def plan(self, request: PlacementRequest) -> PlacementPlan: ...
 
-
-@runtime_checkable
-class InitialPlacementPlanner(Protocol):
-    """An L1 policy whose placement before any statistics is its own layout.
-
-    Optional: a planner without ``initial_plan`` leaves the initial placement
-    to the framework's default.
-    """
-
-    def initial_plan(
-        self,
-        topology: PlacementTopology,
-        *,
-        num_logical_experts: int,
-        num_layers: int,
-    ) -> PlacementPlan: ...

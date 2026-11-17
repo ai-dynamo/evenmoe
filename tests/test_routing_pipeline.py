@@ -330,13 +330,16 @@ def test_from_algorithm_builds_routers_from_policy_declarations():
         source_rank=1,
         experts_per_rank=8,
         registry=registry,
+        placement_policy="external_l1",
         backend="stub",
     )
 
     assert isinstance(mlb._routing_policies["external"], _Router)
     assert (seen["context"].ep_size, seen["context"].source_rank) == (4, 1)
     assert seen["context"].experts_per_rank == 8
+    # placement_policy configures the balancer; it is not a builder option.
     assert seen["context"].options == {"backend": "stub"}
+    assert mlb.placement_policy == "external_l1"
 
 
 @pytest.mark.unit

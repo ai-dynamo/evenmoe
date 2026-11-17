@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 
-from evenmoe.core.l1 import InitialPlacementPlanner, PlacementPlanner
+from evenmoe.core.l1 import _L1_DATA_VIEWS, PlacementPlanner
 from evenmoe.core.l2 import (
     GlobalLogicalCountConsumer,
     RoutingCollectives,
@@ -24,6 +24,7 @@ from evenmoe.core.types import (
     PlacementPolicyConfig,
     PlacementRequest,
     PlacementSnapshot,
+    PlacementStats,
     PlacementTopology,
     RoutingDecision,
     RoutingPhase,
@@ -104,6 +105,7 @@ class MoELoadBalancer:
         experts_per_rank: int,
         collectives: RoutingCollectives | None = None,
         registry: PolicyRegistry | None = None,
+        placement_policy: PlacementPolicyConfig | str | None = None,
         **options: object,
     ) -> MoELoadBalancer:
         """Build the routers one algorithm expression selects.
@@ -111,6 +113,13 @@ class MoELoadBalancer:
         Each selected policy constructs its own router through
         ``RoutingPolicySpec.build_router``; ``options`` is handed to every
         builder for policy-specific injections (for example ``lplb_kernels``).
+
+        ``placement_policy`` sets the default L1 policy at construction, for a
+        framework that selects it separately from the routing algorithm
+        (vLLM's ``VLLM_EVENMOE_L1_ALGORITHM``, SGLang's ``eplb_algorithm``). A
+        per-call ``placement_policy`` argument or ``PlacementRequest.policy``
+        still overrides it for one call, and the constructor's L1/L2
+        compatibility check applies to it. It is not part of ``options``.
         """
 
         pipeline = RoutingPipeline.from_value(algorithm, registry=registry)
@@ -131,6 +140,7 @@ class MoELoadBalancer:
         return cls(
             routing_policies=routers,
             routing_pipeline=pipeline,
+            placement_policy=placement_policy,
             collectives=collectives,
             registry=registry,
         )
@@ -236,6 +246,50 @@ class MoELoadBalancer:
     def plan_placement(self, request: PlacementRequest) -> PlacementPlan:
         """Run the selected L1 policy and return an uncommitted candidate."""
 
+        policy = self._request_placement_policy(request)
+        planner = self._placement_planner(policy.name)
+        return planner.plan(replace(request, policy=policy))
+
+    def plan_layer_placement(self, request: PlacementRequest, local_count: object) -> PlacementPlan:
+        """Re-plan one layer from this rank's logical counts for it.
+
+        ``request`` describes the layer's topology and policy; its ``stats``
+        are replaced. ``local_count`` is this rank's ``[num_logical_experts]``
+        count for the layer. The counts are combined over the EP group with
+        :meth:`aggregate_logical_count`, in the view the request's policy (or
+        the configured one) declares, and the layer is planned with
+        :meth:`plan_placement`. The returned plan has a leading layer
+        dimension of 1.
+
+        Every EP rank must call it together: it runs one collective through
+        the injected :class:`RoutingCollectives`. The framework decides when,
+        moves the weights and commits the placement. It takes counts rather
+        than TopK ids because a framework may already hold them: vLLM
+        accumulates per-layer counts inside its CUDA graph.
+        """
+
+        import torch
+
+        if not isinstance(local_count, torch.Tensor) or local_count.dim() != 1:
+            raise ValueError("local_count must be a 1-D [num_logical_experts] tensor.")
+        topology = request.topology
+        if local_count.numel() > topology.num_physical_experts:
+            raise ValueError(
+                "local_count has more logical experts than the topology has physical slots."
+            )
+        policy = self._request_placement_policy(request)
+        logical_count = self.aggregate_logical_count(
+            local_count[None, :],
+            ep_size=topology.num_physical_experts // topology.num_local_physical_experts,
+            placement_policy=policy.name,
+        )
+        return self.plan_placement(
+            replace(request, policy=policy, stats=PlacementStats(logical_count=logical_count))
+        )
+
+    def _request_placement_policy(self, request: PlacementRequest) -> PlacementPolicyConfig:
+        """The request's L1 policy, or the configured one when it names none."""
+
         policy = PlacementPolicyConfig.from_value(request.policy)
         if policy.is_disabled:
             policy = self._configured_placement_policy
@@ -244,8 +298,7 @@ class MoELoadBalancer:
                 "Placement policy is disabled. The framework must skip the "
                 "plan_placement call when it decides not to rebalance."
             )
-        planner = self._placement_planner(policy.name)
-        return planner.plan(replace(request, policy=policy))
+        return policy
 
     def plan_initial_placement(
         self,
@@ -258,7 +311,7 @@ class MoELoadBalancer:
         """An L1 policy's placement before any statistics exist.
 
         ``placement_policy`` defaults to the configured one, as in
-        :meth:`requires_per_source_rank_statistics`, so a framework that
+        :meth:`placement_logical_count`, so a framework that
         selects its L1 policy separately from the routing pipeline (vLLM) can
         ask for the policy it will run. None when no placement policy is
         configured or the policy has no layout of its own; the framework then
@@ -270,30 +323,37 @@ class MoELoadBalancer:
             if self._configured_placement_policy.is_disabled:
                 return None
             placement_policy = self._configured_placement_policy.name
-        planner = self._placement_planner(placement_policy)
-        if not isinstance(planner, InitialPlacementPlanner):
+        initial_plan = getattr(self._placement_planner(placement_policy), "initial_plan", None)
+        if initial_plan is None:
             return None
-        return planner.initial_plan(
+        return initial_plan(
             topology, num_logical_experts=num_logical_experts, num_layers=num_layers
         )
 
-    def requires_per_source_rank_statistics(self, placement_policy: str | None = None) -> bool:
-        """Whether an L1 policy solves from each source EP rank's own counts.
+    def placement_logical_count(self, placement_policy: str | None = None) -> str:
+        """The ``logical_count`` data view an L1 policy solves from.
 
-        When True the framework keeps the rank dimension while it aggregates
-        recorded statistics and passes ``[ranks, layers, logical_experts]``;
-        otherwise it may sum over ranks. ``placement_policy`` defaults to the
-        configured one, so a framework that selects its L1 policy separately
-        from the routing pipeline (vLLM) can ask about the policy it will run.
-        False when no placement policy is configured.
+        ``"per_source_rank"``: the framework keeps the rank dimension while it
+        aggregates recorded statistics and passes
+        ``[ep_size, layers, logical_experts]``. ``"global"``: it may sum over
+        ranks. ``placement_policy`` defaults to the configured one, so a
+        framework that selects its L1 policy separately from the routing
+        pipeline (vLLM) can ask about the policy it will run. ``"global"``
+        when no placement policy is configured.
         """
 
         if placement_policy is None:
             if self._configured_placement_policy.is_disabled:
-                return False
+                return "global"
             placement_policy = self._configured_placement_policy.name
         planner = self._placement_planner(placement_policy)
-        return bool(getattr(planner, "requires_per_source_rank_statistics", False))
+        view = getattr(planner, "logical_count", "global")
+        if view not in _L1_DATA_VIEWS:
+            raise ValueError(
+                f"Placement policy {placement_policy!r} declares logical_count={view!r}; "
+                f"an L1 policy may declare one of {_L1_DATA_VIEWS}."
+            )
+        return view
 
     def aggregate_logical_count(
         self,
@@ -306,9 +366,9 @@ class MoELoadBalancer:
 
         Returns ``PlacementStats.logical_count`` for ``placement_policy`` (the
         configured one by default): ``[ep_size, layers, logical_experts]`` with
-        one row per source rank when
-        :meth:`requires_per_source_rank_statistics` holds, otherwise the
-        ``[1, layers, logical_experts]`` EP-wide sum. Runs one collective
+        one row per source rank when :meth:`placement_logical_count` is
+        ``"per_source_rank"``, otherwise the ``[1, layers, logical_experts]``
+        EP-wide sum. Runs one collective
         through the injected :class:`RoutingCollectives`, so every EP rank
         must call it together: its ``all_gather`` for per-source-rank counts
         when it has one, otherwise an AllReduce. The payload is 1-D: a
@@ -320,7 +380,7 @@ class MoELoadBalancer:
 
         if not isinstance(local_count, torch.Tensor) or local_count.dim() != 2:
             raise ValueError("local_count must be a [layers, logical_experts] tensor.")
-        if not self.requires_per_source_rank_statistics(placement_policy):
+        if self.placement_logical_count(placement_policy) == "global":
             reduced = self._all_reduce_sum(local_count.reshape(-1), ep_size)
             if not isinstance(reduced, torch.Tensor):
                 raise TypeError("Logical-count AllReduce must return a torch.Tensor.")
