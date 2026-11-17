@@ -330,13 +330,16 @@ def test_from_algorithm_builds_routers_from_policy_declarations():
         source_rank=1,
         experts_per_rank=8,
         registry=registry,
+        placement_policy="external_l1",
         backend="stub",
     )
 
     assert isinstance(mlb._routing_policies["external"], _Router)
     assert (seen["context"].ep_size, seen["context"].source_rank) == (4, 1)
     assert seen["context"].experts_per_rank == 8
+    # placement_policy configures the balancer; it is not a builder option.
     assert seen["context"].options == {"backend": "stub"}
+    assert mlb.placement_policy == "external_l1"
 
 
 @pytest.mark.unit
@@ -472,3 +475,57 @@ def test_policy_rejects_invalid_backend_restriction(backends):
         RoutingPolicySpec(
             "external", RoutingPhase.PHYSICAL_ROUTING, supported_a2a_backends=backends
         )
+
+
+_ULTRAEP_DEPLOYMENT = {
+    "num_redundant_experts": 32,
+    "carries_placement_metadata": True,
+    "ep_size": 8,
+    "num_logical_experts": 256,
+}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        ({"ep_size": 1}, "more than one rank"),
+        ({"num_redundant_experts": 12}, "redundant experts to split evenly"),
+        ({"num_logical_experts": 250}, "logical experts to split evenly"),
+    ],
+)
+def test_ultraep_reports_its_rank_local_layout_preconditions(overrides, message):
+    """Reported while the framework reads its configuration, not at the first
+    solve in the middle of a forward pass."""
+    reason = RoutingPipeline.from_value("ultraep").is_applicable(
+        ExpertDeploymentConfig(**{**_ULTRAEP_DEPLOYMENT, **overrides})
+    )
+    assert reason is not None and message in reason
+
+
+@pytest.mark.unit
+def test_ultraep_layout_checks_only_what_the_framework_provides():
+    pipeline = RoutingPipeline.from_value("ultraep")
+    assert pipeline.is_applicable(ExpertDeploymentConfig(**_ULTRAEP_DEPLOYMENT)) is None
+    # Without ep_size, the rank-local checks have nothing to check against.
+    assert (
+        pipeline.is_applicable(
+            ExpertDeploymentConfig(num_redundant_experts=12, carries_placement_metadata=True)
+        )
+        is None
+    )
+    # Without the expert count, the remaining checks still run.
+    deployment = {**_ULTRAEP_DEPLOYMENT, "num_logical_experts": None}
+    assert pipeline.is_applicable(ExpertDeploymentConfig(**deployment)) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("algorithm", ["static", "lplb", "waterfill", "lplb+waterfill"])
+def test_rank_local_layout_is_not_a_requirement_of_other_policies(algorithm):
+    deployment = {**_ULTRAEP_DEPLOYMENT, "ep_size": 1, "num_redundant_experts": 3}
+    assert (
+        RoutingPipeline.from_value(algorithm).is_applicable(
+            ExpertDeploymentConfig(**deployment, routes_shared_expert=True)
+        )
+        is None
+    )

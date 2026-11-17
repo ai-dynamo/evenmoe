@@ -45,6 +45,13 @@ class ExpertDeploymentConfig:
     committed ``PlacementSnapshot.metadata``. An L1 policy may publish state its
     own L2 half needs there (``ultraep`` puts its per-replica quota there); a
     framework that does not carry it silently degrades that policy."""
+    ep_size: int | None = None
+    """EP group size, when the framework knows it. Checks that need it are
+    skipped while it is None, so a framework adapter should fill it (SGLang:
+    ``evenmoe.adapters.sglang.to_deployment_config``)."""
+    num_logical_experts: int | None = None
+    """Routed logical experts per layer, when the framework knows it. Checks
+    that need it are skipped while it is None."""
 
 
 @dataclass(frozen=True)
@@ -132,6 +139,13 @@ class RoutingPolicySpec:
     ``build_router`` constructs the policy's :class:`TokenRouter` for
     :meth:`MoELoadBalancer.from_algorithm`; a spec without it can only be used
     with an explicitly supplied router.
+
+    ``requires_rank_local_redundancy`` declares a layout where every EP rank
+    owns an equal block of master experts plus its own redundant slots, so the
+    EP group, the logical experts and the redundant experts must all split
+    evenly across ranks. It is checked against
+    :attr:`ExpertDeploymentConfig.ep_size`, so a framework that leaves that
+    unset skips it.
     """
 
     name: str
@@ -150,6 +164,7 @@ class RoutingPolicySpec:
     incompatible_with: frozenset[str] = frozenset()
     configure: Callable[[RoutingPolicyConfig], RoutingPolicySpec] | None = None
     build_router: Callable[[RouterBuildContext], TokenRouter] | None = None
+    requires_rank_local_redundancy: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "incompatible_with", frozenset(self.incompatible_with))
@@ -188,7 +203,31 @@ class RoutingPolicySpec:
             return f"{self.name} requires plan metadata in the committed PlacementSnapshot"
         if self.phase is RoutingPhase.SHARED_EXPERT and not deployment.routes_shared_expert:
             return f"{self.name} requires the runtime to dispatch the shared expert"
+        if self.requires_rank_local_redundancy and (
+            reason := _rank_local_redundancy_reason(self.name, deployment)
+        ):
+            return reason
         return None
+
+
+def _rank_local_redundancy_reason(name: str, deployment: ExpertDeploymentConfig) -> str | None:
+    ep_size = deployment.ep_size
+    if ep_size is None:
+        return None
+    if ep_size <= 1:
+        return f"{name} requires an EP group of more than one rank, got ep_size={ep_size}"
+    if deployment.num_redundant_experts % ep_size != 0:
+        return (
+            f"{name} requires redundant experts to split evenly across EP ranks, got "
+            f"{deployment.num_redundant_experts} for ep_size={ep_size}"
+        )
+    num_logical_experts = deployment.num_logical_experts
+    if num_logical_experts is not None and num_logical_experts % ep_size != 0:
+        return (
+            f"{name} requires logical experts to split evenly across EP ranks, got "
+            f"{num_logical_experts} for ep_size={ep_size}"
+        )
+    return None
 
 
 InputTransform = Callable[

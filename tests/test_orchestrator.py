@@ -149,6 +149,108 @@ def test_configured_placement_policy_is_the_default_and_request_can_override_it(
     assert auto.seen_policy.name == "auto"
 
 
+class _TwoRankCollectives:
+    """Rank 0 of a two-rank EP group whose peer routed one token to expert 1."""
+
+    rank = 0
+    world_size = 2
+
+    def __init__(self):
+        self.payloads = []
+
+    def all_reduce_sum(self, payload):
+        self.payloads.append(payload.clone())
+        peer = torch.zeros_like(payload)
+        # The EP-wide sum is one [experts] row; the per-source-rank payload
+        # holds a row per rank, and the peer fills row 1.
+        peer.view(-1, 2)[-1] = torch.tensor([0, 1], dtype=payload.dtype)
+        return payload + peer
+
+
+class _LayerPlanner:
+    _PLAN = PlacementPlan(
+        physical_to_logical_map=torch.tensor([[0, 1, 0, 1]]),
+        logical_to_all_physical_map=torch.tensor([[[0, 2], [1, 3]]]),
+        logical_to_physical_count=torch.tensor([[2, 2]]),
+    )
+
+    def __init__(self, logical_count):
+        self.logical_count = logical_count
+        self.requests = []
+
+    def plan(self, request):
+        self.requests.append(request)
+        return self._PLAN
+
+
+def _layer_request(policy="disabled", logical_count=None) -> PlacementRequest:
+    return PlacementRequest(
+        stats=PlacementStats(logical_count=logical_count),
+        topology=PlacementTopology(
+            num_physical_experts=4, num_local_physical_experts=2, num_groups=1, num_nodes=1
+        ),
+        policy=policy,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "view, payloads, expected",
+    [
+        # This rank fills only its own row of one flat payload.
+        ("per_source_rank", [[2, 1, 0, 0]], [[[2, 1]], [[0, 1]]]),
+        # Only this rank's [experts] vector goes over the wire.
+        ("global", [[2, 1]], [[[2, 2]]]),
+    ],
+)
+def test_layer_placement_combines_counts_in_the_view_the_policy_declares(view, payloads, expected):
+    planner = _LayerPlanner(view)
+    collectives = _TwoRankCollectives()
+    mlb = MoELoadBalancer(placement_planners={"custom": planner}, collectives=collectives)
+
+    plan = mlb.plan_layer_placement(
+        _layer_request("custom"), torch.tensor([2, 1], dtype=torch.int32)
+    )
+
+    assert plan is _LayerPlanner._PLAN
+    assert [p.tolist() for p in collectives.payloads] == payloads
+    (request,) = planner.requests
+    assert request.policy.name == "custom"
+    assert request.stats.logical_count.tolist() == expected
+
+
+@pytest.mark.unit
+def test_layer_placement_falls_back_to_the_configured_policy_and_replaces_stats():
+    configured = _LayerPlanner("per_source_rank")
+    other = _LayerPlanner("global")
+    mlb = MoELoadBalancer(
+        placement_planners={"configured": configured, "other": other},
+        placement_policy="configured",
+        collectives=_TwoRankCollectives(),
+    )
+
+    mlb.plan_layer_placement(
+        _layer_request(logical_count=torch.ones((1, 1, 2))), torch.tensor([2, 1])
+    )
+
+    (request,) = configured.requests
+    assert request.policy.name == "configured"
+    # The configured policy's view decides the combination; stale stats are dropped.
+    assert request.stats.logical_count.tolist() == [[[2, 1]], [[0, 1]]]
+    assert other.requests == []
+
+
+@pytest.mark.unit
+def test_layer_placement_rejects_bad_counts_and_a_disabled_policy():
+    mlb = MoELoadBalancer(collectives=_TwoRankCollectives())
+    with pytest.raises(ValueError, match="1-D"):
+        mlb.plan_layer_placement(_layer_request("deepseek"), torch.ones((1, 2)))
+    with pytest.raises(ValueError, match="more logical experts"):
+        mlb.plan_layer_placement(_layer_request("deepseek"), torch.ones(5))
+    with pytest.raises(ValueError, match="disabled"):
+        mlb.plan_layer_placement(_layer_request(), torch.ones(2))
+
+
 @pytest.mark.unit
 def test_configured_routing_pipeline_is_the_default_and_request_can_override_it():
     calls = []

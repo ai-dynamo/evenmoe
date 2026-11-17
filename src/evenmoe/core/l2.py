@@ -28,6 +28,12 @@ class RoutingCollectives(Protocol):
     EvenMoE owns the count tensors, payload packing, and the point in the routing
     pipeline at which communication is required.  The serving framework owns
     the process group and the concrete all-reduce implementation.
+
+    A transport may also define ``all_gather(payload)``, returning every rank's
+    1-D ``payload`` concatenated in rank order.
+    :meth:`MoELoadBalancer.aggregate_logical_count` then gathers per-source-rank
+    counts directly instead of all-reducing a zero-padded payload ``world_size``
+    times as large.
     """
 
     @property

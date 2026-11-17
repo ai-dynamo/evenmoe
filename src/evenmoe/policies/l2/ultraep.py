@@ -114,5 +114,6 @@ ROUTING_POLICY = RoutingPolicySpec(
     required_placement="ultraep",
     requires_redundancy=True,
     requires_placement_metadata=True,
+    requires_rank_local_redundancy=True,
     build_router=lambda context: UltraEPL2Router(),
 )
