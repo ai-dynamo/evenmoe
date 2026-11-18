@@ -13,6 +13,7 @@ from evenmoe.core.l2 import (
     TokenRouter,
 )
 from evenmoe.core.policy import (
+    A2A_MEGAMOE,
     PolicyRegistry,
     RouterBuildContext,
     RoutingCapabilities,
@@ -106,6 +107,7 @@ class MoELoadBalancer:
         collectives: RoutingCollectives | None = None,
         registry: PolicyRegistry | None = None,
         placement_policy: PlacementPolicyConfig | str | None = None,
+        a2a_backend: str | None = None,
         **options: object,
     ) -> MoELoadBalancer:
         """Build the routers one algorithm expression selects.
@@ -120,9 +122,22 @@ class MoELoadBalancer:
         per-call ``placement_policy`` argument or ``PlacementRequest.policy``
         still overrides it for one call, and the constructor's L1/L2
         compatibility check applies to it. It is not part of ``options``.
+
+        A policy that reads the global rank load falls back to its declared
+        fallback when the per-layer collective is unsafe: with no
+        ``collectives`` and EP size > 1, or on ``a2a_backend`` MegaMoE, which
+        may skip routing on EP ranks without tokens.
         """
 
         pipeline = RoutingPipeline.from_value(algorithm, registry=registry)
+        if collectives is None and ep_size > 1:
+            pipeline = pipeline.without_global_rank_load(
+                f"no RoutingCollectives for EP size {ep_size}"
+            )
+        elif a2a_backend == A2A_MEGAMOE:
+            pipeline = pipeline.without_global_rank_load(
+                "MegaMoE may skip routing on EP ranks without tokens"
+            )
         context = RouterBuildContext(
             ep_size=ep_size,
             source_rank=source_rank,
