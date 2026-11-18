@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 
@@ -16,6 +17,8 @@ from evenmoe.core.policy import (
     RoutingPolicySpec,
 )
 from evenmoe.core.types import RoutingPhase, RoutingPolicyConfig
+
+logger = logging.getLogger(__name__)
 
 _PHASE_ORDER = {RoutingPhase.PHYSICAL_ROUTING: 0, RoutingPhase.SHARED_EXPERT: 1}
 _DISABLED = frozenset({"", "none", "disabled"})
@@ -47,12 +50,16 @@ class RoutingPipeline:
             )
 
         names = {step.spec.name for step in steps}
+        resolved = []
         for step in steps:
             conflicts = step.spec.incompatible_with & names
             if conflicts:
-                raise ValueError(
-                    f"{step.spec.name} cannot be combined with {sorted(conflicts)}."
-                )
+                reason = f"{step.spec.name} cannot be combined with {sorted(conflicts)}"
+                if step.spec.fallback is None:
+                    raise ValueError(f"{reason}.")
+                step = _fall_back(step, reason)
+            resolved.append(step)
+        steps = tuple(resolved)
         required_l1 = {step.spec.required_placement for step in steps} - {None}
         if len(required_l1) > 1:
             raise ValueError("Routing policies require incompatible L1 placement policies.")
@@ -109,6 +116,17 @@ class RoutingPipeline:
             ),
             None,
         )
+
+    def without_global_rank_load(self, reason: str) -> RoutingPipeline:
+        """Swap each ``rank_load="global"`` step that declares a fallback for it."""
+
+        steps = tuple(
+            _fall_back(step, reason)
+            if step.spec.rank_load == "global" and step.spec.fallback is not None
+            else step
+            for step in self.steps
+        )
+        return self if steps == self.steps else replace(self, steps=steps)
 
     def is_applicable(self, deployment: ExpertDeploymentConfig) -> str | None:
         for step in self.steps:
@@ -205,6 +223,15 @@ class RoutingPipeline:
                 steps.append(_RoutingStep(default.resolve(config), config, implicit=True))
 
         return cls(steps=tuple(steps), input_transform=transform)
+
+
+def _fall_back(step: _RoutingStep, reason: str) -> _RoutingStep:
+    fallback = step.spec.fallback
+    assert fallback is not None
+    logger.warning(
+        "%s falls back to rank_load=%r: %s.", step.spec.name, fallback.rank_load, reason
+    )
+    return replace(step, spec=fallback)
 
 
 def _merge_capabilities(steps: Sequence[_RoutingStep]) -> RoutingCapabilities:

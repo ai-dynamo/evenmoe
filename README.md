@@ -52,6 +52,24 @@ Support below refers to EvenMoE's `main`-branch adapters; serving requires the c
 
 Compose L2 policies with `+`, for example `lplb+waterfill` or `ultraep+waterfill`, subject to the framework support above.
 
+### Waterfill options
+
+Two environment variables shape Waterfill. Set them in the serving framework's environment; the defaults need no setting.
+
+- `WATERFILL_LOAD_VIEW`: `global` (default) balances against every rank's load, gathered with one all-reduce per MoE layer; `local` uses this rank's own load and no collective. `global` falls back to `local` with a warning after LPLB, without a collectives adapter, and on MegaMoE.
+- `WATERFILL_CANDIDATES`: `routed` (default) sends a token's shared expert only to its own rank or a rank its routed experts already go to; `all` allows any rank.
+
+Prefill change versus EPLB, 8 × H20, SGLang TP8/EP8 + DeepEP, three rounds (same-domain GSM8K / MMLU; cross-domain GSM8K / MMLU):
+
+| Load view + candidates | DeepSeek-V3 | GLM-5.3 |
+|:---|:---|:---|
+| `global` + `routed` (default) | +0.31% / +0.06%; +4.32% / +3.89% | +1.16% / +0.80%; +4.37% / +4.49% |
+| `global` + `all` | +0.25% / −0.08%; +4.32% / +3.89% | +1.14% / +0.71%; +4.34% / +4.48% |
+| `local` + `routed` | −0.28% / −0.25%; +4.01% / +3.27% | −0.08% / −0.04%; +3.79% / +3.60% |
+| `local` + `all` | −0.57% / −0.60%; +4.03% / +3.30% | −0.50% / −0.34%; +3.93% / +3.67% |
+
+Waterfill slows decode in every combination (GLM-5.3 TPOT +5% to +12% over EPLB at concurrency 8 and 64), so enable it on prefill instances only.
+
 ¹ METRO acts on decode steps and needs the vLLM integration's METRO decode-routing fixes. In vLLM it helps only at small decode batches: on DeepSeek-V3 EP8 (H20) with 64 redundant experts it lowered TPOT by 4.4% at 1 request per rank and raised it from 16 requests per rank. See [vLLM](#vllm).
 
 ## Performance
@@ -71,6 +89,8 @@ Placement is recorded once per dataset. **Same-domain** serves the dataset its p
 | UltraEP + Waterfill | 20.9K (+16.6%) | 21.0K (+11.2%) | 20.9K (+16.6%) | 21.0K (+11.2%) |
 
 Each workload used 1,000 prompts with ~1K-token inputs, concurrency 256, and `max_tokens=1` (prefill-only); values are the median of three measured rounds.
+
+The Waterfill rows were measured with `local` + `all`, the default at the time; see [Waterfill options](#waterfill-options) for the current default.
 
 ## Quick Start
 

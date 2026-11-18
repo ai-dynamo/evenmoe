@@ -146,6 +146,11 @@ class RoutingPolicySpec:
     evenly across ranks. It is checked against
     :attr:`ExpertDeploymentConfig.ep_size`, so a framework that leaves that
     unset skips it.
+
+    ``fallback`` is the declaration to run instead when this one cannot: an
+    ``incompatible_with`` policy is selected, or (for ``rank_load="global"``)
+    :meth:`MoELoadBalancer.from_algorithm` finds no safe collective. Without
+    one, a conflict is an error.
     """
 
     name: str
@@ -165,6 +170,7 @@ class RoutingPolicySpec:
     configure: Callable[[RoutingPolicyConfig], RoutingPolicySpec] | None = None
     build_router: Callable[[RouterBuildContext], TokenRouter] | None = None
     requires_rank_local_redundancy: bool = False
+    fallback: RoutingPolicySpec | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "incompatible_with", frozenset(self.incompatible_with))
