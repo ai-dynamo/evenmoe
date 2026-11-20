@@ -44,6 +44,7 @@ Support below refers to EvenMoE's `main`-branch adapters; serving requires the c
 | | UltraEP | ✅ | ✅ |
 | **L2 · Token routing** | Static (deterministic replica rule) | ✅ | ✅ |
 | | LPLB | ✅ | ✅ |
+| | Rank-Local Replica Balancing (RLRB) | ❌ | 🚧² |
 | | METRO | ✅ | ✅¹ |
 | | Waterfill | ✅ | ✅ |
 | | UltraEP | ✅ | ✅ |
@@ -53,6 +54,12 @@ Support below refers to EvenMoE's `main`-branch adapters; serving requires the c
 Compose L2 policies with `+`, for example `lplb+waterfill` or `ultraep+waterfill`, subject to the framework support above.
 
 ¹ METRO acts on decode steps and needs the vLLM integration's METRO decode-routing fixes. In vLLM it helps only at small decode batches: on DeepSeek-V3 EP8 (H20) with 64 redundant experts it lowered TPOT by 4.4% at 1 request per rank and raised it from 16 requests per rank. See [vLLM](#vllm).
+
+² RLRB is an opt-in L2 policy for the matching vLLM integration. It uses this
+rank's current Top-K histogram, one replica headroom update and rank-rotated
+sampling. A single CUDA kernel also records the routed load for EPLB. The
+policy requires no routing-statistics collective and uses the committed EPLB
+placement.
 
 ## Performance
 
@@ -197,6 +204,14 @@ Keep the launch flags and change the environment variables to select an algorith
 | METRO on a fixed placement | `deepseek_hierarchical` | `metro` |
 
 Waterfill requires a supported shared-expert model and an evenly divisible physical-expert layout; the branch enables shared-expert fusion when Waterfill is selected. LPLB, METRO and UltraEP require redundant experts. METRO acts on decode steps, so decode with `deepep_low_latency`, and set `EVENMOE_FRESH_COUNTS=1` so every layer routes on the current step's expert counts rather than the previous step's. It has been validated only on a fixed placement: load one with `"init_placement_path"` and set a `"step_interval"` that is never reached. Unlike in SGLang, the per-layer count, all-reduce and route before dispatch are not overlapped with the shared-expert GEMM, so METRO pays off only at small decode batches. Keep `use_async` set to `false` and `--enforce-eager`. `--numa-bind` pins each engine to its GPU's CPU socket and is recommended on two-socket nodes. For a periodic re-fit (`"step_interval"` below 1000) also set `"window_size"` to the same value.
+
+For **RLRB**, select `l2_algorithm: "rlrb"` in `--eplb-config` with the matching
+vLLM integration. The fused path targets Blackwell GB200/GB300, TP1, EP16/32,
+128 logical experts and 32 redundant replicas, with contiguous int32 Top-4 and
+128 or 256 rows per rank. Use FlashInfer two-sided NVLink, synchronous EPLB and
+compilation mode `NONE` (`0`) with `FULL_DECODE_ONLY` CUDA graphs. For that
+launch, omit `--enforce-eager`. Other batches use vLLM replica routing. The
+original kernel timings were measured at 256 rows per rank.
 
 Start **UltraEP** on the same topology, refreshing every 8 representative prefill batches:
 

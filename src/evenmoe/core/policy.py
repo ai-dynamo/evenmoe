@@ -90,6 +90,8 @@ class RoutingCapabilities:
     graph_stability: str = "stable"
     """``stable``, or ``realloc_on_placement_change`` when a placement update can
     replace policy tensors and invalidate a captured graph."""
+    fuses_replica_mapping_and_recording: bool = False
+    """A prepared router accepts the framework's load counter and record gate."""
 
     def supports_a2a_backend(self, backend: str | None) -> bool:
         """Whether a backend, by its EvenMoE name, satisfies this pipeline.
@@ -164,6 +166,7 @@ class RoutingPolicySpec:
     incompatible_with: frozenset[str] = frozenset()
     configure: Callable[[RoutingPolicyConfig], RoutingPolicySpec] | None = None
     build_router: Callable[[RouterBuildContext], TokenRouter] | None = None
+    fuses_replica_mapping_and_recording: bool = False
     requires_rank_local_redundancy: bool = False
 
     def __post_init__(self) -> None:

@@ -235,6 +235,8 @@ def _merge_capabilities(steps: Sequence[_RoutingStep]) -> RoutingCapabilities:
         dispatch_fixed_by_placement=bool(steps)
         and all(spec.dispatch_fixed_by_placement for spec in specs),
         consumes_global_logical_count=any(spec.logical_count == "global" for spec in specs),
+        fuses_replica_mapping_and_recording=len(specs) == 1
+        and specs[0].fuses_replica_mapping_and_recording,
         supports_concurrent_microbatches=all(
             spec.supports_concurrent_microbatches for spec in specs
         ),
