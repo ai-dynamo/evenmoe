@@ -78,7 +78,7 @@ GPU kernels additionally require a compatible NVIDIA GPU and CUDA toolchain.
 
 | Dependency | Required version |
 |:---|:---|
-| Python | ≥ 3.10 |
+| Python | ≥ 3.11 |
 | PyTorch (`torch`) | ≥ 2.5 |
 | Triton (`triton`) | ≥ 3.0 |
 | TVM FFI (`apache-tvm-ffi`) | ≥ 0.1.0 |
