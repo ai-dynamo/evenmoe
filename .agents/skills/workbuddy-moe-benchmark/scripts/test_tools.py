@@ -6,6 +6,7 @@ import unittest
 
 from prepare_workloads import SUBSETS, sample, split_tasks
 from summarize import summarize
+from summarize_batches import summarize_batches
 
 
 class ToolsTest(unittest.TestCase):
@@ -72,6 +73,52 @@ class ToolsTest(unittest.TestCase):
         plan['sessions_per_seed'] = 1
         result = summarize(plan, rows[:3])['results'][0]
         self.assertIsNone(result['stddev_ktokens_s'])
+
+
+    def test_slow_round_retained_despite_zero_between_session_sd(self):
+        plan, _ = self.fixture()
+        plan.update(seeds=[8], sessions_per_seed=3)
+        rows = [{'stage': 'prefill', 'policy': 'baseline', 'concurrency': 8, 'seed': 8,
+                     'session': s, 'round': r, 'status': 'ok', 'ktokens_s': v}
+                for s, values in enumerate([[100, 100, 86], [100, 92, 100], [100, 100, 100]], 1)
+                for r, v in enumerate(values, 1)]
+        output = summarize(plan, rows)
+        result = output['results'][0]
+        self.assertEqual(result['stddev_ktokens_s'], 0)
+        self.assertEqual(result['session_statistics'][0]['range_over_median'], .14)
+        self.assertEqual(result['session_statistics'][1]['range_over_median'], .08)
+        self.assertEqual(len(output['round_records']), 9)
+        self.assertTrue(all(r['included'] for r in output['round_records']))
+
+    def test_failed_attempt_and_warmup_preserved(self):
+        plan, rows = self.fixture()
+        failed = dict(rows[0], attempt=2, status='interference', ktokens_s=0.5)
+        warmup = dict(rows[0], phase='warmup', round=5)
+        result = summarize(plan, rows + [failed, warmup])
+        self.assertEqual(result['status'], 'complete')
+        self.assertEqual(len(result['round_records']), 11)
+        self.assertFalse(result['round_records'][-2]['included'])
+        self.assertEqual(result['round_records'][-2]['ktokens_s'], 0.5)
+        with self.assertRaises(ValueError):
+            summarize(plan, rows + [dict(rows[0], attempt=2)])
+        with self.assertRaises(ValueError):
+            summarize(plan, [dict(rows[0], included=False)] + rows[1:])
+
+    def test_rank_replicated_batch_not_summed(self):
+        rows = [{'policy': 'baseline', 'concurrency': 8, 'seed': 8, 'session': 1, 'round': 1,
+                     'attempt': 1, 'rank': rank, 'tp_rank': rank, 'dp_rank': 0, 'ep_rank': rank,
+                     'execution_phase': 'prefill', 'step_id': i, 'timestamp_ns': i,
+                     'clock_domain': 'host', 'requests': n, 'tokens': n*100, 'padded_tokens': 800}
+                for rank in range(4) for i, n in enumerate([2, 4, 8])]
+        result = summarize_batches(rows, 'all_steps')
+        self.assertEqual(len(result['groups']), 4)
+        self.assertTrue(all(r['distributions']['tokens']['p50'] == 400
+                            for r in result['groups']))
+        self.assertFalse(result['coverage_verified'])
+        with self.assertRaises(ValueError):
+            summarize_batches(rows + rows[:1], 'all_steps')
+        with self.assertRaises(ValueError):
+            summarize_batches([dict(rows[0], padded_tokens=1)], 'all_steps')
 
 
 if __name__ == '__main__':

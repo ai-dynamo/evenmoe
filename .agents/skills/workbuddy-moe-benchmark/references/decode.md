@@ -25,6 +25,8 @@
 
 ## Warmup 与验证
 
-同Prefill采用固定3~5预热窗口的稳定性判据，每正式cohort前一轮预热。Profile放在测量后，单独C128 cohort，在所有请求首token到达后采集约8步，检查全部8张卡的kernel。
+同 Prefill 采用预先声明的可配置预热判据（默认 3–5 轮），每正式cohort前一轮预热。Profile放在测量后，单独C128 cohort，在所有请求首token到达后采集约8步，检查全部8张卡的kernel。
 
 TWF首次接入先验证C1、3、8的空rank场景，再C128/512长Decode，再trace；不要只用均匀batch微基准宣布修复。保存所有失败attempt，服务预热结束和health ready都不等于测量完成。
+
+预热通过不保证正式轮稳定。保留全部正式轮及失败尝试，按 reporting.md 分离启动内和启动间波动，按 [实际 batch](batch.md) 记录执行 batch；不得把输出候选数或 TP 复制的 token 当作完成输出数。
