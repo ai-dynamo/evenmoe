@@ -1,0 +1,89 @@
+{
+  "stage": "prefill",
+  "backend": "megamoe_nvfp4",
+  "host": null,
+  "model_path": null,
+  "model_revision": null,
+  "tokenizer_hashes": {},
+  "image_digest": null,
+  "runtime_commits": {},
+  "quantization_provenance": null,
+  "placement_sha256": null,
+  "tp": 8,
+  "attention_dp": 8,
+  "ep": 8,
+  "seeds": [
+    8,
+    28,
+    2026
+  ],
+  "policies": [
+    "baseline",
+    "eplb",
+    "eplb_lplb",
+    "eplb_waterfill",
+    "eplb_lplb_waterfill",
+    "ultraep",
+    "ultraep_waterfill"
+  ],
+  "concurrencies": [
+    8,
+    32,
+    64,
+    128,
+    256
+  ],
+  "sessions_per_seed": 1,
+  "rounds_per_session": 3,
+  "requests_per_round": 1000,
+  "output_tokens": 1,
+  "prefix_cache": false,
+  "cuda_graph": false,
+  "warmup": {
+    "minimum": 3,
+    "maximum": 5,
+    "range_over_median_limit": 0.02,
+    "pass_does_not_imply_formal_stability": true,
+    "between_formal_rounds": 1
+  },
+  "output_dir": "outputs/workbuddy-new-run",
+  "reporting": {
+    "retain_all_attempts": true,
+    "plots": [
+      "box_and_round_points",
+      "round_trajectory"
+    ],
+    "within_session_metrics": [
+      "median",
+      "sample_sd",
+      "min",
+      "max",
+      "range_over_median",
+      "cv"
+    ]
+  },
+  "batch_capture": {
+    "availability": "unconfigured",
+    "coverage": null,
+    "hook_location": null,
+    "clock_domain": null,
+    "overhead_audit": null
+  },
+  "routing_capture": {
+    "requested": true,
+    "availability": "unconfigured",
+    "mode": "diagnostic_only",
+    "paired_throughput_run_id": null,
+    "coverage": null,
+    "hook_location": null,
+    "id_space": null,
+    "preserve_raw_topk_ids": true,
+    "preserve_token_identity": true,
+    "preserve_placement_versions": true,
+    "preserve_actual_dispatch_assignment": true,
+    "separate_target_draft_verify": true,
+    "verify_tp_replica_consistency": true,
+    "overhead_audit": null,
+    "protocol": "references/routing.md"
+  }
+}
