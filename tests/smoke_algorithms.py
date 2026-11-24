@@ -163,7 +163,7 @@ def _run(expression: str | None, env: dict[str, str]) -> dict:
 
 
 CASES = [
-    ("disabled", None, {}),
+    ("no routing", None, {}),
     ("static", "static", {}),
     ("dynamic", "dynamic", {}),
     ("dynamic_random", "dynamic_random", {}),
