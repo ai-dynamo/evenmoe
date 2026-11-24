@@ -115,7 +115,7 @@ def _tolist(value):
     return value
 
 
-def _run(expression: str, env: dict[str, str]) -> dict:
+def _run(expression: str | None, env: dict[str, str]) -> dict:
     for key in ("LPLB_USE_LOCAL_COUNT", "WATERFILL_USE_GLOBAL_LOAD"):
         os.environ.pop(key, None)
     os.environ.update(env)
@@ -163,7 +163,7 @@ def _run(expression: str, env: dict[str, str]) -> dict:
 
 
 CASES = [
-    ("disabled", "none", {}),
+    ("disabled", None, {}),
     ("static", "static", {}),
     ("dynamic", "dynamic", {}),
     ("dynamic_random", "dynamic_random", {}),

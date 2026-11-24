@@ -100,11 +100,22 @@ def test_fake_is_a_pre_topk_preset_with_dynamic_default():
         "waterfill+waterfill",
         "unknown",
         "static+",
+        "",
+        "none",
+        "disabled",
     ],
 )
 def test_routing_pipeline_rejects_invalid_composition(value):
     with pytest.raises(ValueError):
         RoutingPipeline.from_value(value)
+
+
+@pytest.mark.unit
+def test_none_is_the_only_way_to_select_no_routing():
+    pipeline = RoutingPipeline.from_value(None)
+
+    assert pipeline.steps == ()
+    assert pipeline.name == "disabled"
 
 
 class _PreparingRouter:
@@ -410,7 +421,7 @@ def test_default_placement_planners_come_from_the_registry():
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("algorithm", ["disabled", "static", "dynamic", "fake", "lplb"])
+@pytest.mark.parametrize("algorithm", [None, "static", "dynamic", "fake", "lplb"])
 def test_replica_policies_do_not_restrict_a2a_backend(algorithm):
     assert RoutingPipeline.from_value(algorithm).capabilities.supported_a2a_backends is None
 

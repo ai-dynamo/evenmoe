@@ -18,7 +18,6 @@ from evenmoe.core.policy import (
 from evenmoe.core.types import RoutingPhase, RoutingPolicyConfig
 
 _PHASE_ORDER = {RoutingPhase.PHYSICAL_ROUTING: 0, RoutingPhase.SHARED_EXPERT: 1}
-_DISABLED = frozenset({"", "none", "disabled"})
 
 
 @dataclass(frozen=True)
@@ -142,7 +141,8 @@ class RoutingPipeline:
             from evenmoe.policies.registry import builtin_registry
 
             registry = builtin_registry()
-        if value is None or (isinstance(value, str) and value.strip().lower() in _DISABLED):
+        # None is the only "no routing" selection; a string must name a policy.
+        if value is None:
             return cls()
 
         if isinstance(value, str):
