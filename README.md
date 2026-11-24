@@ -46,6 +46,7 @@ Support below refers to EvenMoE's `main`-branch adapters; serving requires the c
 | | LPLB | ✅ | ✅ |
 | | METRO | ✅ | ✅¹ |
 | | Waterfill | ✅ | ✅ |
+| | Waterfill, tile mode (`tile_rows` > 1) | 🚧² | ❌ |
 | | UltraEP | ✅ | ✅ |
 | | LPLB + Waterfill | ✅ | ✅ |
 | | UltraEP + Waterfill | ✅ | ✅ |
@@ -53,6 +54,8 @@ Support below refers to EvenMoE's `main`-branch adapters; serving requires the c
 Compose L2 policies with `+`, for example `lplb+waterfill` or `ultraep+waterfill`, subject to the framework support above.
 
 ¹ METRO acts on decode steps and needs the vLLM integration's METRO decode-routing fixes. In vLLM it helps only at small decode batches: on DeepSeek-V3 EP8 (H20) with 64 redundant experts it lowered TPOT by 4.4% at 1 request per rank and raised it from 16 requests per rank. See [vLLM](#vllm).
+
+² Needs the framework hooks in [Waterfill tile mode](#waterfill-tile-mode-decode).
 
 ## Performance
 
@@ -155,6 +158,10 @@ Keep the launch flags and change the two selectors to switch algorithms:
 | METRO on a fixed placement (drop `--enable-eplb`) | *(omit)* | `metro` |
 
 LPLB requires redundant replicas (`--ep-num-redundant-experts > 0`) and a recorded placement passed via `--init-expert-location` (produced once with `--enable-eplb`). [METRO](https://arxiv.org/abs/2512.09277) assigns each decode step's active replicated experts to ranks so every rank reads as few distinct expert weights as possible, and routes prefill and mixed steps with the static replica rule. It has been validated only on a fixed placement: keep `--ep-num-redundant-experts` and `--init-expert-location`, drop `--enable-eplb`, select `metro`, and retain DeepEP. Waterfill requires a shared-expert model. To run Waterfill without periodic EPLB, drop `--enable-eplb`/`--eplb-algorithm`, select `waterfill`, and retain DeepEP.
+
+#### Waterfill tile mode (decode)
+
+A grouped GEMM pays for whole `BLOCK_M`-row tiles, so in decode a rank's MoE time follows its tiles, not its rows. `tile_rows` > 1 (policy metadata or `EVENMOE_WATERFILL_TILE_ROWS`; the default 1 is row-level Waterfill, unchanged) makes Waterfill place the shared-expert rows in whole tiles of a plan every rank computes from the exchanged per-expert counts (NVLink P2P in one node, else the framework all-reduce); `tile_rho` / `EVENMOE_WATERFILL_TILE_RHO` (1.5) weighs a tile's worth of rows against a tile. Enable it for decode with the DeepEP or MegaMoE backend and set `tile_rows` to the MoE kernel's tile: 64 for DeepGEMM's masked grouped GEMM and MegaMoE on SM90; a framework may also pass its kernel's `BLOCK_M` per call in `RoutingRequest.metadata["tile_rows"]`. It requires every EP rank to make every routing call (an idle rank routes an empty batch), at most 32 EP ranks, and no two-batch overlap; it composes with `static` and `lplb`, not with UltraEP.
 
 ### vLLM
 
