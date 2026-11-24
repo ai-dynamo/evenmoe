@@ -5,26 +5,24 @@
 
 The algorithm is a degenerate L2 case: it does not modify the routed top-k
 (which already lives in physical-id space after the preceding replica router),
-and only decides which EP rank receives each token's shared expert. The two
-load views are distinguished by whether
-``RoutingRequest.active_rank_token_count`` is provided:
+and only decides which EP rank receives each token's shared expert. Two
+independent options shape it, set with ``WATERFILL_LOAD_VIEW`` /
+``WATERFILL_CANDIDATES`` or, per policy, ``RoutingPolicyConfig.metadata``
+(which takes precedence):
 
-- Local-load Waterfill (``waterfill``, no EP all-reduce): the orchestrator passes
-  ``routed_rank_load = local_routed
-  counts`` and ``active_rank_token_count = None``. The kernel sees
-  ``rank_load == routed_load`` and derives ``target_total`` from their sum.
-  ``ALLOW_ALL_RANKS=True`` (caller asserts every rank is a valid shared-expert
-  destination because EPLB already balances routed load).
+- ``load_view``: ``global`` (default) balances against the EP-wide routed
+  load plus every rank's token count, which the orchestrator gathers with one
+  all-reduce per MoE layer; ``local`` uses this rank's own routed load and no
+  collective. ``global`` falls back to ``local`` with a warning where the
+  collective is unsafe (after LPLB, without collectives, on MegaMoE).
+- ``candidates``: ``routed`` (default) keeps the shared row on the source
+  rank or a rank the token's routed experts already go to; ``all`` allows
+  any rank.
 
-- Collective-backed Waterfill (``WATERFILL_USE_GLOBAL_LOAD=1``): the orchestrator passes
-  ``routed_rank_load`` (post-AR
-  global routed counts) and ``active_rank_token_count`` (post-AR per-rank
-  active token counts). The kernel uses ``rank_load = routed + active`` for
-  scoring and ``routed_load = routed`` for ``total_tokens`` derivation. The
-  candidate set is always restricted to ``token's routed ranks ∪ source``
-  (``ALLOW_ALL_RANKS=False``) — this is conservative (loses the "fully
-  balanced → all-ranks" optimization the PR's CPU-sync-bearing path enabled)
-  but eliminates the two GPU→CPU syncs per layer.
+``local`` + ``routed`` estimates the EP-wide view from this rank alone
+(routed load x W, plus this batch's rows on every rank). The uniform term
+cancels in the kernel's weights, so they are W times the ``local`` + ``all``
+weights; only the candidate set differs. Every path is sync-free.
 """
 
 from __future__ import annotations
@@ -44,6 +42,25 @@ from evenmoe.core.types import (
     RoutingRequest,
 )
 from evenmoe.kernels.ops.waterfill import waterfill_select
+
+# option -> (environment variable, allowed values, the first being the default)
+_OPTIONS = {
+    "load_view": ("WATERFILL_LOAD_VIEW", ("global", "local")),
+    "candidates": ("WATERFILL_CANDIDATES", ("routed", "all")),
+}
+
+
+def waterfill_option(config: RoutingPolicyConfig | None, option: str) -> str:
+    """``config.metadata[option]``, else its environment variable, else the default."""
+
+    env, allowed = _OPTIONS[option]
+    value = None if config is None else config.metadata.get(option)
+    if value is None:
+        value = os.environ.get(env) or allowed[0]
+    choice = str(value).strip().lower()
+    if choice not in allowed:
+        raise ValueError(f"Waterfill {option}={value!r} is not one of {', '.join(allowed)}.")
+    return choice
 
 
 class WaterfillL2Router(TokenRouter):
@@ -71,6 +88,7 @@ class WaterfillL2Router(TokenRouter):
         local_preference: float = 1.1,
         world_size: int,
         experts_per_rank: int,
+        candidates: str = "routed",
     ):
         if world_size <= 0:
             raise ValueError("WaterfillL2Router.world_size must be positive.")
@@ -86,6 +104,9 @@ class WaterfillL2Router(TokenRouter):
         self.local_preference = local_preference
         self.world_size = world_size
         self.experts_per_rank = experts_per_rank
+        if candidates not in _OPTIONS["candidates"][1]:
+            raise ValueError(f"WaterfillL2Router.candidates={candidates!r} is not routed or all.")
+        self.candidates = candidates
 
     def route_tokens(
         self,
@@ -119,18 +140,23 @@ class WaterfillL2Router(TokenRouter):
                 metadata={"policy": policy.name, "empty": True},
             )
 
-        # Both paths are sync-free: routed_load is always pure routed counts
-        # (used by the kernel to derive total_tokens internally). rank_load is
-        # the effective load used for scoring (= routed in static; routed+active
-        # in dynamic — a single elementwise add, no .item()).
-        if active is None:
-            rank_load = routed
-            routed_load = routed
-            allow_all_ranks = True
-        else:
+        candidates = (
+            waterfill_option(policy, "candidates")
+            if "candidates" in policy.metadata
+            else self.candidates
+        )
+        allow_all_ranks = candidates == "all"
+        if active is not None:
+            # Global view: rank_load scores, routed_load sets the fill level.
             rank_load = routed + active
             routed_load = routed
-            allow_all_ranks = False
+        elif allow_all_ranks:
+            rank_load = routed
+            routed_load = routed
+        else:
+            # Local view estimate: this rank's load stands in for every rank's.
+            routed_load = routed.to(torch.int64) * self.world_size
+            rank_load = routed_load + int(topk_ids.shape[0])
 
         chosen_rank = waterfill_select(
             rank_load=rank_load,
@@ -149,20 +175,20 @@ class WaterfillL2Router(TokenRouter):
             shared_expert_rank=chosen_rank,
             metadata={
                 "policy": policy.name,
+                "load_view": "local" if active is None else "global",
                 "allow_all_ranks": allow_all_ranks,
             },
         )
 
 
 def _configure(config: RoutingPolicyConfig) -> RoutingPolicySpec:
-    # TODO: Replace WATERFILL_USE_GLOBAL_LOAD with an explicit
-    # RoutingPolicyConfig option read from ``config``.
-    del config
-    if os.environ.get("WATERFILL_USE_GLOBAL_LOAD", "0") == "1":
-        # Global Waterfill cannot follow LPLB yet: all ranks are not guaranteed
-        # to enter the second collective.
-        return replace(ROUTING_POLICY, rank_load="global", incompatible_with=frozenset({"lplb"}))
-    return ROUTING_POLICY
+    if waterfill_option(config, "load_view") == "local":
+        return _LOCAL
+    # Not every rank is guaranteed to enter LPLB's collective, so a second
+    # one after it could hang.
+    return replace(
+        _LOCAL, rank_load="global", incompatible_with=frozenset({"lplb"}), fallback=_LOCAL
+    )
 
 
 def _build_router(context: RouterBuildContext) -> WaterfillL2Router:
@@ -170,14 +196,15 @@ def _build_router(context: RouterBuildContext) -> WaterfillL2Router:
         source_rank=context.source_rank,
         world_size=context.ep_size,
         experts_per_rank=context.experts_per_rank,
+        candidates=waterfill_option(None, "candidates"),
     )
 
 
-ROUTING_POLICY = RoutingPolicySpec(
+_LOCAL = RoutingPolicySpec(
     "waterfill",
     WaterfillL2Router.phase,
     rank_load="local",
     supported_a2a_backends=(A2A_DEEPEP, A2A_MEGAMOE),
-    configure=_configure,
     build_router=_build_router,
 )
+ROUTING_POLICY = replace(_LOCAL, configure=_configure)

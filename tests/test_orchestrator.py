@@ -21,7 +21,16 @@ from evenmoe import (
     RoutingRequest,
     RoutingStage,
 )
+from evenmoe.core.policy import A2A_DEEPEP, A2A_MEGAMOE
 from evenmoe.kernels.ops.counting import count_routed_per_rank
+
+
+@pytest.fixture(autouse=True)
+def _local_waterfill(monkeypatch):
+    """Most tests here exercise the rank-load counter, which is the local view;
+    the tests of the global default unset this."""
+    monkeypatch.setenv("WATERFILL_LOAD_VIEW", "local")
+    monkeypatch.delenv("WATERFILL_CANDIDATES", raising=False)
 
 
 def _placement() -> PlacementSnapshot:
@@ -388,8 +397,8 @@ def test_default_rank_counter_resolves_routing_metadata(rank_map_kind):
 
 
 @pytest.mark.unit
-def test_global_waterfill_packs_rank_and_active_load_into_one_collective(monkeypatch):
-    monkeypatch.setenv("WATERFILL_USE_GLOBAL_LOAD", "1")
+def test_default_waterfill_packs_rank_and_active_load_into_one_collective(monkeypatch):
+    monkeypatch.delenv("WATERFILL_LOAD_VIEW")
     calls = []
     shared = _SharedRouter(calls)
     collectives = _RecordingCollectives(torch.tensor([1, 1, 0, 3]))
@@ -422,13 +431,12 @@ def test_global_waterfill_packs_rank_and_active_load_into_one_collective(monkeyp
 
 
 @pytest.mark.unit
-def test_global_rank_load_follows_the_policy_declaration_not_its_name(monkeypatch):
+def test_global_rank_load_follows_the_policy_declaration_not_its_name():
     """The orchestrator issues the rank-load collective for whichever policy
     declares ``rank_load="global"``; it never keys off the policy's name."""
     from evenmoe.core.policy import PolicyRegistry, RoutingPolicySpec
     from evenmoe.policies.registry import builtin_registry
 
-    monkeypatch.delenv("WATERFILL_USE_GLOBAL_LOAD", raising=False)
     calls = []
     shared = _SharedRouter(calls)
     collectives = _RecordingCollectives(torch.tensor([1, 1, 0, 3]))
@@ -856,3 +864,41 @@ def test_lplb_local_count_does_not_change_other_count_consumers(monkeypatch):
 
     assert torch.equal(router.seen_count, torch.tensor([5.0, 8.0]))
     assert len(collectives.payloads) == 1
+
+
+def _waterfill_step(mlb):
+    return mlb.routing_pipeline.spec_for("waterfill")
+
+
+@pytest.mark.unit
+def test_from_algorithm_keeps_global_waterfill_with_collectives_on_deepep(monkeypatch, caplog):
+    monkeypatch.delenv("WATERFILL_LOAD_VIEW")
+    with caplog.at_level("WARNING"):
+        mlb = MoELoadBalancer.from_algorithm(
+            "waterfill", ep_size=2, source_rank=0, experts_per_rank=2,
+            collectives=_RecordingCollectives(torch.zeros(4)), a2a_backend=A2A_DEEPEP,
+        )
+
+    assert _waterfill_step(mlb).rank_load == "global"
+    assert not caplog.records
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("collectives", "a2a_backend", "reason"),
+    [(None, A2A_DEEPEP, "no RoutingCollectives"), ("given", A2A_MEGAMOE, "MegaMoE")],
+)
+def test_from_algorithm_falls_back_to_local_waterfill_where_the_collective_is_unsafe(
+    monkeypatch, caplog, collectives, a2a_backend, reason
+):
+    monkeypatch.delenv("WATERFILL_LOAD_VIEW")
+    if collectives == "given":
+        collectives = _RecordingCollectives(torch.zeros(4))
+    with caplog.at_level("WARNING"):
+        mlb = MoELoadBalancer.from_algorithm(
+            "waterfill", ep_size=2, source_rank=0, experts_per_rank=2,
+            collectives=collectives, a2a_backend=a2a_backend,
+        )
+
+    assert _waterfill_step(mlb).rank_load == "local"
+    assert [r.getMessage() for r in caplog.records if reason in r.getMessage()]

@@ -14,6 +14,7 @@ from evenmoe import (
     RoutingPipeline,
 )
 from evenmoe.core.policy import PolicyRegistry, RoutingPolicySpec
+from evenmoe.policies.registry import builtin_registry
 
 
 def _placement() -> PlacementSnapshot:
@@ -250,21 +251,44 @@ def test_lplb_local_count_mode_is_declared_by_the_policy(monkeypatch):
 
 
 @pytest.mark.unit
-def test_waterfill_global_load_mode_is_declared_by_the_policy(monkeypatch):
-    monkeypatch.setenv("WATERFILL_USE_GLOBAL_LOAD", "1")
+@pytest.mark.parametrize(("env", "rank_load"), [(None, "global"), ("local", "local")])
+def test_waterfill_load_view_is_declared_by_the_policy(monkeypatch, env, rank_load):
+    if env is None:
+        monkeypatch.delenv("WATERFILL_LOAD_VIEW", raising=False)
+    else:
+        monkeypatch.setenv("WATERFILL_LOAD_VIEW", env)
 
-    pipeline = RoutingPipeline.from_value("waterfill")
-    waterfill = pipeline.steps[1]
-
-    assert waterfill.spec.rank_load == "global"
+    assert RoutingPipeline.from_value("waterfill").spec_for("waterfill").rank_load == rank_load
 
 
 @pytest.mark.unit
-def test_global_waterfill_rejects_lplb_until_collectives_are_uniform(monkeypatch):
-    monkeypatch.setenv("WATERFILL_USE_GLOBAL_LOAD", "1")
+def test_global_waterfill_falls_back_to_local_after_lplb(monkeypatch, caplog):
+    monkeypatch.delenv("WATERFILL_LOAD_VIEW", raising=False)
 
-    with pytest.raises(ValueError, match="waterfill cannot be combined with.*lplb"):
-        RoutingPipeline.from_value("lplb+waterfill")
+    with caplog.at_level("WARNING"):
+        pipeline = RoutingPipeline.from_value("lplb+waterfill")
+
+    assert pipeline.spec_for("waterfill").rank_load == "local"
+    assert len(caplog.records) == 1
+    assert "cannot be combined with ['lplb']" in caplog.records[0].getMessage()
+
+
+@pytest.mark.unit
+def test_a_conflict_without_fallback_is_an_error():
+    base = builtin_registry()
+    registry = PolicyRegistry(
+        physical_routers=base.physical_routers,
+        shared_expert_routers={
+            "picky": RoutingPolicySpec(
+                "picky", RoutingPhase.SHARED_EXPERT, incompatible_with={"lplb"}
+            ),
+        },
+        default_physical_router=base.default_physical_router,
+        placement_planners=base.placement_planners,
+    )
+
+    with pytest.raises(ValueError, match="picky cannot be combined with.*lplb"):
+        RoutingPipeline.from_value("lplb+picky", registry=registry)
 
 
 @pytest.mark.unit

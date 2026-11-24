@@ -118,6 +118,9 @@ def to_load_balancer_kwargs(context: RuntimeContext) -> dict:
         "source_rank": context.parallel.moe_ep_rank,
         "experts_per_rank": layout["num_local_physical_experts"],
         "collectives": _SGLangCollectives(context),
+        "a2a_backend": a2a_backend_from_sglang(
+            getattr(context.config_bag("exec").moe, "moe_a2a_backend", None)
+        ),
     }
 
 
