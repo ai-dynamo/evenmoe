@@ -29,14 +29,26 @@ deriving them from a placement. With ``L`` logical experts, ``G`` EP ranks,
   on device so the tables can be rewritten in place under CUDA graphs.
 
 All tables are int32.
+
+The bounded repair of this assignment lives in this module as well. The
+policy uses the fused CUDA implementation on supported geometries and keeps
+the greedy operator for larger layouts or an explicit zero-move budget.
 """
 
 from __future__ import annotations
+
+import pathlib
+from typing import TYPE_CHECKING
 
 import torch
 import triton
 import triton.language as tl
 from torch import Tensor
+
+from evenmoe.kernels.jit.utils import cache_once, load_jit, make_cpp_args
+
+if TYPE_CHECKING:
+    from tvm_ffi.module import Module
 
 MAX_RANKS = 128
 """The greedy packs ``(load, rank)`` into one int32 key with 7 rank bits."""
@@ -339,3 +351,177 @@ def _route_host(
         valid &= rows < int(num_token_non_padded.reshape(-1)[0])
     physical = torch.where(valid, chosen[ids.clamp(0, num_logical - 1)], -1)
     return physical.to(out_dtype)
+
+
+# Bounded repair of the greedy assignment.
+
+_HERE = pathlib.Path(__file__).parent.resolve()
+
+_REPAIR_MAX_LOGICAL = 256
+"""Experts tracked in the kernel's 256-bit active / edge masks."""
+
+_REPAIR_MAX_RANKS = 32
+"""Ranks addressed by one warp lane each."""
+
+
+def supports_repair(num_logical: int, num_ranks: int) -> bool:
+    """Whether the fused kernel covers this geometry."""
+
+    return 0 < num_logical <= _REPAIR_MAX_LOGICAL and 0 < num_ranks <= _REPAIR_MAX_RANKS
+
+
+@cache_once
+def _route_module(in_dtype: torch.dtype, out_dtype: torch.dtype, num_ranks: int) -> Module:
+    args = make_cpp_args(in_dtype, out_dtype, num_ranks)
+    return load_jit(
+        "metro_repair_route",
+        *args,
+        cuda_files=["metro.cuh"],
+        cuda_wrappers=[("metro_repair_route", f"metro_repair_route<{args}>")],
+        source_root=_HERE,
+    )
+
+
+def metro_repair_route(
+    logical_topk_ids: Tensor,
+    *,
+    holder_mask: Tensor,
+    physical_by_rank: Tensor,
+    default_physical: Tensor,
+    counts: Tensor | None = None,
+    num_token_non_padded: Tensor | None = None,
+    moves: int = 32,
+    early_exit: bool = True,
+    out_dtype: torch.dtype = torch.int64,
+    rank_load: Tensor | None = None,
+) -> Tensor:
+    """Map logical TopK ids ``[T, K]`` to physical copies after METRO's bounded repair.
+
+    ``counts`` is the ``[L]`` EP-summed per-logical count (active iff > 0).
+    When it is ``None`` the active set is taken from ``logical_topk_ids``
+    itself, which is only rank-consistent when every rank holds the same
+    EP-global TopK (all-gather MoE). ``num_token_non_padded`` is an optional
+    one-element tensor; rows at or past it, and ids outside ``[0, L)``, come
+    back as -1. ``rank_load`` (``[G]`` int32), if given, receives each rank's
+    number of distinct active experts after routing. One launch on the current
+    stream; no host synchronization, so it is CUDA-graph safe. CPU routing
+    uses the reference assignment and requires explicit global ``counts``.
+    """
+
+    num_logical, num_ranks = physical_by_rank.shape
+    if not supports_repair(num_logical, num_ranks):
+        raise ValueError(
+            f"METRO bounded repair supports <= {_REPAIR_MAX_LOGICAL} experts and <= {_REPAIR_MAX_RANKS} ranks; "
+            f"got {num_logical} and {num_ranks}."
+        )
+    if logical_topk_ids.dtype not in (torch.int32, torch.int64):
+        raise TypeError(f"logical_topk_ids must be int32 or int64, got {logical_topk_ids.dtype}.")
+    if out_dtype not in (torch.int32, torch.int64):
+        raise TypeError(f"out_dtype must be int32 or int64, got {out_dtype}.")
+    if moves < 0:
+        raise ValueError("moves must be non-negative.")
+    ids = logical_topk_ids if logical_topk_ids.dim() == 2 else logical_topk_ids.reshape(-1, 1)
+    ids = ids.contiguous()
+    device = ids.device
+    if counts is None:
+        counts_arg = torch.empty(0, dtype=torch.float32, device=device)
+    else:
+        if counts.shape != (num_logical,):
+            raise ValueError(f"counts must have shape [{num_logical}], got {tuple(counts.shape)}.")
+        counts_arg = counts if counts.dtype == torch.float32 else counts.to(torch.float32)
+        counts_arg = counts_arg.contiguous()
+    if num_token_non_padded is None:
+        gate = torch.empty(0, dtype=torch.int32, device=device)
+    else:
+        gate = num_token_non_padded.reshape(-1)[:1]
+        gate = gate if gate.dtype == torch.int32 else gate.to(torch.int32)
+    if not ids.is_cuda:
+        if counts is None:
+            raise ValueError("CPU METRO repair routing requires global counts.")
+        load, owner = metro_repair_assign_reference(
+            counts_arg > 0, physical_by_rank, moves=moves, early_exit=early_exit
+        )
+        chosen = default_physical.cpu().long().clone()
+        active = owner >= 0
+        chosen[active] = physical_by_rank.cpu()[active, owner[active].long()].long()
+        if rank_load is not None:
+            rank_load.copy_(load)
+        return _route_host(logical_topk_ids, chosen, num_token_non_padded, out_dtype)
+    if rank_load is None:
+        rank_load = torch.empty(num_ranks, dtype=torch.int32, device=device)
+    out = torch.empty(ids.shape, dtype=out_dtype, device=device)
+    _route_module(ids.dtype, out_dtype, num_ranks).metro_repair_route(
+        ids,
+        out,
+        counts_arg,
+        gate,
+        holder_mask,
+        physical_by_rank,
+        default_physical,
+        rank_load,
+        int(moves),
+        bool(early_exit),
+    )
+    return out.view(logical_topk_ids.shape)
+
+
+def metro_repair_assign_reference(
+    active: Tensor, physical_by_rank: Tensor, *, moves: int = 32, early_exit: bool = False
+) -> tuple[Tensor, Tensor]:
+    """Host oracle: ``([G] load, [L] owner rank or -1)`` for a ``[L]`` bool active set.
+
+    Starts from METRO's greedy (same order and tie-break as
+    ``metro_assign_reference``) and applies the repair moves in the kernel's
+    order. ``early_exit=False`` runs every improving move up to ``moves``.
+    """
+
+    ranks = int(physical_by_rank.shape[1])
+    act = [bool(x) for x in active.detach().cpu().tolist()]
+    holders = [
+        [g for g, p in enumerate(row) if p >= 0] for row in physical_by_rank.detach().cpu().tolist()
+    ]
+    owner = [-1] * len(act)
+    load = [0] * ranks
+    for e, live in enumerate(act):
+        if live and len(holders[e]) == 1:
+            owner[e] = holders[e][0]
+            load[owner[e]] += 1
+    forced = max(load) if load else 0
+    for e, live in enumerate(act):
+        if live and owner[e] < 0:
+            owner[e] = min(holders[e], key=lambda g: (load[g], g))
+            load[owner[e]] += 1
+    lower_bound = max(-(-sum(act) // ranks), forced)
+    for _ in range(moves):
+        if early_exit and max(load) <= lower_bound:
+            break
+        edge: dict[tuple[int, int], int] = {}
+        for e, live in enumerate(act):
+            if live:
+                for dst in holders[e]:
+                    if dst != owner[e]:
+                        edge.setdefault((owner[e], dst), e)
+        paths = []
+        for src in range(ranks):
+            for dst in range(ranks):
+                if load[src] - load[dst] < 2:
+                    continue
+                mid = ranks if (src, dst) in edge else -1
+                if mid < 0:
+                    mid = next(
+                        (m for m in range(ranks) if (src, m) in edge and (m, dst) in edge), -1
+                    )
+                if mid >= 0:
+                    paths.append((-load[src], load[dst], src, dst, mid))
+        if not paths:
+            break
+        _, _, src, dst, mid = min(paths)
+        if mid == ranks:
+            owner[edge[src, dst]] = dst
+        else:
+            first, second = edge[src, mid], edge[mid, dst]
+            owner[first] = mid
+            owner[second] = dst
+        load[src] -= 1
+        load[dst] += 1
+    return torch.tensor(load, dtype=torch.int32), torch.tensor(owner, dtype=torch.int32)
