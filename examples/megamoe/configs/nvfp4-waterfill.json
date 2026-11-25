@@ -1,0 +1,5 @@
+{
+  "precision": "nvfp4",
+  "policy": "static+waterfill",
+  "twf": false
+}

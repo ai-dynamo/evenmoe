@@ -1,0 +1,59 @@
+{
+  "base_image": "lmsysorg/sglang@sha256:069efa1d6a2d58309529f53eeee34c39d69b1cdb455eaf7fb8de83e3fd0be727",
+  "sglang": {
+    "url": "https://github.com/sgl-project/sglang.git",
+    "commit": "232e96a466cbde0f126f47776f378f66a81200b8"
+  },
+  "flashinfer": {
+    "url": "https://github.com/flashinfer-ai/flashinfer.git",
+    "commit": "da992ed9919604c5eb6dc255c63f5e89a466452c"
+  },
+  "deepgemm": {
+    "distribution": "sgl-deep-gemm",
+    "version": "0.2.3.post2",
+    "source": "Inherited from pinned base image; not rebuilt by this example."
+  },
+  "twf": {
+    "url": "https://github.com/xutizhou/sglang-moe-lb-waterfill-dev",
+    "commit": "a85e2a43307d436477d096647066cd4899b64f87",
+    "license": "Apache-2.0"
+  },
+  "patches": [
+    {
+      "file": "patches/mega_moe_sm90.py.patch",
+      "target": "sglang/srt/layers/moe/mega_moe_sm90.py",
+      "base_sha256": "a8321b531086d88a83bdc8370d610f90a332f16d53497d91b164a54e61356ce9",
+      "result_sha256": "27c373caa7edb6024e5d634bf8ae46eb850641ef7bb963db1c24d0d51bc7128d"
+    },
+    {
+      "file": "patches/mega_moe_sm90_fi_nvfp4.py.patch",
+      "target": "sglang/srt/layers/moe/mega_moe_sm90_fi_nvfp4.py",
+      "base_sha256": "5b6dbd524bf8ba0286da38fbe65f01944929d8e25e297cf23e8dcfa57993ef75",
+      "result_sha256": "a0079dd034687c6baca291fc0b11bec1a4577d1e60916ca5b05d19e1b5e353e1"
+    },
+    {
+      "file": "patches/mega_moe.py.patch",
+      "target": "sglang/srt/layers/moe/mega_moe.py",
+      "base_sha256": "d203169bf424af2623d2873a7ba4873ad00fa90d6ba4579e09cb43634b929751",
+      "result_sha256": "82d0bb6c41e64f6fe7288f11ffcdef2266535bc592fd7ac1e920af129112b36b"
+    },
+    {
+      "file": "patches/megamoe_sm90_common.cuh.patch",
+      "target": "flashinfer/data/csrc/megamoe/megamoe_sm90_common.cuh",
+      "base_sha256": "2155312e6ca550eb23cf960bea2945fbe611b34d0b0c42886dc2059ad80f1df6",
+      "result_sha256": "bb35a441a830747e4948e5fa004fb8b1c7545a6a4305a0dffaccb251e656b54b"
+    },
+    {
+      "file": "patches/megamoe_sm90_nvfp4_config.jinja.patch",
+      "target": "flashinfer/data/csrc/megamoe/megamoe_sm90_nvfp4_config.jinja",
+      "base_sha256": "200adea3a40dc53e5dfd08c5640fafefb20e810fa36f505bbf3a34460655f564",
+      "result_sha256": "69f1e7a0126067cff51fd0c8d772426034c16de2eea8213c6da7d8d4f6f2dabd"
+    },
+    {
+      "file": "patches/megamoe_sm90_nvfp4_split_config.jinja.patch",
+      "target": "flashinfer/data/csrc/megamoe/megamoe_sm90_nvfp4_split_config.jinja",
+      "base_sha256": "14b42e8a89795ef9eb1b1c948d8c32ca7d1dcc8450f25fc14aea1e805c4ec9a6",
+      "result_sha256": "b5722951d9283c59d6e3250f509b62a42396b25b159c4d4eaa938fab315a2623"
+    }
+  ]
+}

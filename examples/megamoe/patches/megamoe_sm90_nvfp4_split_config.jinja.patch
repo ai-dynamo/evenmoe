@@ -1,0 +1,5 @@
+--- a/flashinfer/data/csrc/megamoe/megamoe_sm90_nvfp4_split_config.jinja
++++ b/flashinfer/data/csrc/megamoe/megamoe_sm90_nvfp4_split_config.jinja
+@@ -29 +29 @@
+-constexpr float    kActivationClamp       = {{ activation_clamp }}f;
++constexpr float    kActivationClamp       = {% if activation_clamp > 3.402823466e38 %}cute::numeric_limits<float>::infinity(){% else %}{{ activation_clamp }}f{% endif %};
