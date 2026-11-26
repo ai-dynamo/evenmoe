@@ -226,8 +226,9 @@ class MoELoadBalancer:
         policy_name: str,
         layer_id: int,
         logical_topk_ids: TensorLike,
-    ) -> TensorLike:
-        """Run one prepared physical router without rebuilding an L2 request."""
+        **inputs: TensorLike,
+    ) -> TensorLike | None:
+        """Route with prepared placement state and optional policy-specific tensors."""
 
         try:
             router = self._routing_policies[policy_name]
@@ -241,7 +242,7 @@ class MoELoadBalancer:
             raise ValueError(
                 f"Routing policy {policy_name!r} has no prepared-token fast path."
             )
-        return route_prepared(layer_id, logical_topk_ids)
+        return route_prepared(layer_id, logical_topk_ids, **inputs)
 
     def plan_placement(self, request: PlacementRequest) -> PlacementPlan:
         """Run the selected L1 policy and return an uncommitted candidate."""

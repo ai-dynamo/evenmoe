@@ -40,6 +40,7 @@ def _placement() -> PlacementSnapshot:
         ("fake+static", "fake+static", "static", ("static",)),
         ("fake+lplb", "fake+lplb", "lplb", ("lplb",)),
         ("lp", "lplb", "lplb", ("lplb",)),
+        ("rlrb", "rlrb", "rlrb", ("rlrb",)),
         ("lp+waterfill", "lplb+waterfill", "lplb", ("lplb", "waterfill")),
         ("waterfill", "static+waterfill", "static", ("static", "waterfill")),
         (
@@ -71,6 +72,15 @@ def test_pipeline_capabilities_hide_algorithm_selection_from_framework_glue():
 
 
 @pytest.mark.unit
+def test_rlrb_prepares_placement_and_does_not_request_global_counts():
+    caps = RoutingPipeline.from_value("rlrb").capabilities
+
+    assert caps.requires_placement_state
+    assert caps.fuses_replica_mapping_and_recording
+    assert not caps.consumes_global_logical_count
+
+
+@pytest.mark.unit
 def test_default_replica_selection_is_owned_by_mlb():
     pipeline = RoutingPipeline.default_replica_routing()
 
@@ -98,6 +108,7 @@ def test_fake_is_a_pre_topk_preset_with_dynamic_default():
     [
         "static+dynamic",
         "waterfill+waterfill",
+        "rlrb+waterfill",
         "unknown",
         "static+",
         "",
