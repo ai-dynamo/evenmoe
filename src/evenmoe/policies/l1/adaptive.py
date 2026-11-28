@@ -32,7 +32,7 @@ imbalance to mean something (``min_rows_per_slot`` per physical slot on
 average); a window of a few decode steps leaves every layer as it is.
 
 Tunables (environment, read on first use): ``EVENMOE_ADAPTIVE_THRESHOLD``
-(default 1.10), ``EVENMOE_ADAPTIVE_MIN_GAIN`` (default 0.03),
+(default 1.05), ``EVENMOE_ADAPTIVE_MIN_GAIN`` (default 0.03),
 ``EVENMOE_ADAPTIVE_MIN_ROWS_PER_SLOT`` (default 200) and
 ``EVENMOE_ADAPTIVE_BASE`` (EPLB variant for the fresh plan, default ``auto``).
 """
@@ -58,7 +58,7 @@ from evenmoe.policies.l1.eplb.algorithms import compute_algorithm, rebalance_exp
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_THRESHOLD = 1.10
+_DEFAULT_THRESHOLD = 1.05
 _DEFAULT_MIN_GAIN = 0.03
 _DEFAULT_MIN_ROWS_PER_SLOT = 200.0
 
