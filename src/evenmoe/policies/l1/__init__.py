@@ -10,6 +10,7 @@ planners (CRAFT, MoETuner, replica-budget allocators) implement the same
 
 from __future__ import annotations
 
+from evenmoe.policies.l1.adaptive import AdaptivePlacementPlanner
 from evenmoe.policies.l1.eplb import (
     SUPPORTED_PLACEMENT_POLICIES,
     EplbAlgorithm,
@@ -21,6 +22,7 @@ from evenmoe.policies.l1.ultraep import RefreshGate, UltraEPPlacementPolicy
 
 __all__ = [
     "SUPPORTED_PLACEMENT_POLICIES",
+    "AdaptivePlacementPlanner",
     "EPLBPlacementPlanner",
     "EplbAlgorithm",
     "RefreshGate",

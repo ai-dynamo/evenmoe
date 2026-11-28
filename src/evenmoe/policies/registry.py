@@ -16,6 +16,7 @@ from evenmoe.core.policy import PolicyRegistry
 
 @lru_cache(maxsize=1)
 def builtin_registry() -> PolicyRegistry:
+    from evenmoe.policies.l1.adaptive import AdaptivePlacementPlanner
     from evenmoe.policies.l1.eplb import (
         SUPPORTED_PLACEMENT_POLICIES,
         EPLBPlacementPlanner,
@@ -36,6 +37,7 @@ def builtin_registry() -> PolicyRegistry:
         placement_planners={
             **{name: partial(EPLBPlacementPlanner, name) for name in SUPPORTED_PLACEMENT_POLICIES},
             UltraEPPlacementPolicy.name: UltraEPPlacementPolicy,
+            AdaptivePlacementPlanner.name: AdaptivePlacementPlanner,
         },
         # SGLang spells its own LPLB dispatch algorithm ``lp``; accept the same
         # name so a user can switch to EvenMoE without renaming it.

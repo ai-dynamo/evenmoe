@@ -154,6 +154,14 @@ def to_placement_request(
     if num_physical_experts is None or num_local_physical_experts is None or num_nodes is None:
         raise ValueError("Placement requires a context or explicit expert and node counts.")
 
+    # A planner that decides per layer whether to move (``adaptive``) needs the
+    # placement SGLang has committed. None at startup, before the first commit.
+    current = None
+    if context is not None and algorithm == "adaptive":
+        live = getattr(context.resources, "expert_location_metadata", None)
+        if live is not None:
+            current = _committed_placement(live)
+
     return PlacementRequest(
         stats=PlacementStats(logical_count=logical_count),
         topology=PlacementTopology(
@@ -166,7 +174,52 @@ def to_placement_request(
         policy=PlacementPolicyConfig(
             name="auto" if algorithm is None else algorithm, metadata=policy_metadata or {}
         ),
+        current=current,
     )
+
+
+def _committed_placement(live_metadata: Any) -> dict[int, PlacementSnapshot]:
+    """SGLang's committed placement per layer, read from its host copies.
+
+    The adaptive planner works on the host, so host copies keep a periodic
+    check from synchronizing with the GPU. Layers whose routing metadata
+    carries its own candidates fall back to the live snapshot.
+    """
+
+    import torch
+
+    num_layers = int(live_metadata.physical_to_logical_map.shape[0])
+    p2l = getattr(live_metadata, "physical_to_logical_map_cpu", None)
+    l2p = getattr(live_metadata, "logical_to_all_physical_map_cpu", None)
+    routing = getattr(live_metadata, "mlb_routing_metadata", None) or {}
+    if p2l is None or l2p is None:
+        return {layer: to_placement_snapshot(live_metadata, layer) for layer in range(num_layers)}
+    num_physical = int(live_metadata.num_physical_experts)
+    num_local = int(live_metadata.num_local_physical_experts)
+    num_logical = int(live_metadata.num_logical_experts)
+    p2l = p2l.to(torch.int64)
+    count = torch.zeros((num_layers, num_logical), dtype=torch.int64).scatter_add_(
+        1, p2l, torch.ones_like(p2l)
+    )
+    # SGLang pads the candidate table to the physical width; keep the used part.
+    l2p = l2p[..., : int(count.max())]
+    return {
+        layer: (
+            to_placement_snapshot(live_metadata, layer)
+            if "logical_to_physical_candidates" in routing.get(layer, {})
+            else PlacementSnapshot(
+                layer_id=layer,
+                num_logical_experts=num_logical,
+                num_physical_experts=num_physical,
+                ep_size=num_physical // num_local,
+                num_local_physical_experts=num_local,
+                physical_to_logical_map=p2l[layer],
+                logical_to_physical_candidates=l2p[layer],
+                logical_to_physical_count=count[layer],
+            )
+        )
+        for layer in range(num_layers)
+    }
 
 
 def to_sglang_maps(plan: PlacementPlan, *, layer_id: int | None = None) -> SGLangPlacementMaps:
