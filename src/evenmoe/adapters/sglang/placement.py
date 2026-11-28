@@ -186,6 +186,8 @@ def _committed_placement(live_metadata: Any) -> dict[int, PlacementSnapshot]:
     carries its own candidates fall back to the live snapshot.
     """
 
+    import torch
+
     num_layers = int(live_metadata.physical_to_logical_map.shape[0])
     p2l = getattr(live_metadata, "physical_to_logical_map_cpu", None)
     l2p = getattr(live_metadata, "logical_to_all_physical_map_cpu", None)
@@ -194,14 +196,20 @@ def _committed_placement(live_metadata: Any) -> dict[int, PlacementSnapshot]:
         return {layer: to_placement_snapshot(live_metadata, layer) for layer in range(num_layers)}
     num_physical = int(live_metadata.num_physical_experts)
     num_local = int(live_metadata.num_local_physical_experts)
-    count = (l2p != -1).sum(-1)
+    num_logical = int(live_metadata.num_logical_experts)
+    p2l = p2l.to(torch.int64)
+    count = torch.zeros((num_layers, num_logical), dtype=torch.int64).scatter_add_(
+        1, p2l, torch.ones_like(p2l)
+    )
+    # SGLang pads the candidate table to the physical width; keep the used part.
+    l2p = l2p[..., : int(count.max())]
     return {
         layer: (
             to_placement_snapshot(live_metadata, layer)
             if "logical_to_physical_candidates" in routing.get(layer, {})
             else PlacementSnapshot(
                 layer_id=layer,
-                num_logical_experts=int(live_metadata.num_logical_experts),
+                num_logical_experts=num_logical,
                 num_physical_experts=num_physical,
                 ep_size=num_physical // num_local,
                 num_local_physical_experts=num_local,

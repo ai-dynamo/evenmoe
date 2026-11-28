@@ -291,6 +291,7 @@ def test_sglang_adapter_reads_the_committed_placement_from_host_copies():
         snap = current[layer]
         assert snap.physical_to_logical_map.device.type == "cpu"
         assert torch.equal(snap.physical_to_logical_map, p2l[layer])
-        assert torch.equal(snap.logical_to_physical_candidates, l2p[layer])
+        # only the used part of SGLang's padded candidate table is kept
+        assert torch.equal(snap.logical_to_physical_candidates, l2p[layer][:, :2])
         assert snap.logical_to_physical_count.tolist() == [2, 2]
         assert snap.ep_size == 2
