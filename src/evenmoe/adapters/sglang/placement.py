@@ -154,6 +154,17 @@ def to_placement_request(
     if num_physical_experts is None or num_local_physical_experts is None or num_nodes is None:
         raise ValueError("Placement requires a context or explicit expert and node counts.")
 
+    # A planner that decides per layer whether to move (``adaptive``) needs the
+    # placement SGLang has committed. None at startup, before the first commit.
+    current = None
+    if context is not None and algorithm == "adaptive":
+        live = getattr(context.resources, "expert_location_metadata", None)
+        if live is not None:
+            current = {
+                layer: to_placement_snapshot(live, layer)
+                for layer in range(int(live.physical_to_logical_map.shape[0]))
+            }
+
     return PlacementRequest(
         stats=PlacementStats(logical_count=logical_count),
         topology=PlacementTopology(
@@ -166,6 +177,7 @@ def to_placement_request(
         policy=PlacementPolicyConfig(
             name="auto" if algorithm is None else algorithm, metadata=policy_metadata or {}
         ),
+        current=current,
     )
 
 

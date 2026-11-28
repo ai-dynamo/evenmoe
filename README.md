@@ -41,6 +41,7 @@ Support below refers to EvenMoE's `main`-branch adapters; serving requires the c
 | Level | Algorithm | SGLang | vLLM |
 |:---|:---|:---:|:---:|
 | **L1 · Expert placement** | EPLB | ✅ | ✅ |
+| | Adaptive EPLB (re-plans only drifted layers) | ✅² | ❌ |
 | | UltraEP | ✅ | ✅ |
 | **L2 · Token routing** | Static (deterministic replica rule) | ✅ | ✅ |
 | | LPLB | ✅ | ✅ |
@@ -51,6 +52,8 @@ Support below refers to EvenMoE's `main`-branch adapters; serving requires the c
 | | UltraEP + Waterfill | ✅ | ✅ |
 
 Compose L2 policies with `+`, for example `lplb+waterfill` or `ultraep+waterfill`, subject to the framework support above.
+
+² Adaptive starts from the recorded placement and, at every periodic rebalance, re-plans a layer only when its recent traffic no longer fits it. It needs the committed placement from the framework, which the vLLM adapter does not pass yet. See [SGLang](#sglang).
 
 ¹ METRO acts on decode steps and needs the vLLM integration's METRO decode-routing fixes. In vLLM it helps only at small decode batches: on DeepSeek-V3 EP8 (H20) with 64 redundant experts it lowered TPOT by 4.4% at 1 request per rank and raised it from 16 requests per rank. See [vLLM](#vllm).
 
@@ -150,11 +153,14 @@ Keep the launch flags and change the two selectors to switch algorithms:
 | EPLB + LPLB | `auto` | `lplb` |
 | EPLB + Waterfill | `auto` | `waterfill` |
 | EPLB + LPLB + Waterfill | `auto` | `lplb+waterfill` |
+| Adaptive EPLB + dynamic + Waterfill | `adaptive` | `dynamic+waterfill` |
 | UltraEP | `auto` | `ultraep` |
 | UltraEP + Waterfill | `auto` | `ultraep+waterfill` |
 | METRO on a fixed placement (drop `--enable-eplb`) | *(omit)* | `metro` |
 
 LPLB requires redundant replicas (`--ep-num-redundant-experts > 0`) and a recorded placement passed via `--init-expert-location` (produced once with `--enable-eplb`). [METRO](https://arxiv.org/abs/2512.09277) assigns each decode step's active replicated experts to ranks so every rank reads as few distinct expert weights as possible, and routes prefill and mixed steps with the static replica rule. It has been validated only on a fixed placement: keep `--ep-num-redundant-experts` and `--init-expert-location`, drop `--enable-eplb`, select `metro`, and retain DeepEP. Waterfill requires a shared-expert model. To run Waterfill without periodic EPLB, drop `--enable-eplb`/`--eplb-algorithm`, select `waterfill`, and retain DeepEP.
+
+`--eplb-algorithm adaptive` keeps `--init-expert-location` and `--enable-eplb`. Every `--eplb-rebalance-num-iterations` forward passes (set `--expert-distribution-recorder-buffer-size` to the same value; 8 in our runs), it compares each layer's recent traffic under the committed placement with a fresh EPLB plan. It re-plans a layer only when that layer's rank imbalance exceeds `EVENMOE_ADAPTIVE_THRESHOLD` (default 1.10), a plan fitted on half of the window beats the committed placement on the other half by at least `EVENMOE_ADAPTIVE_MIN_GAIN` (0.03), and the window holds at least `EVENMOE_ADAPTIVE_MIN_ROWS_PER_SLOT` (200) rows per physical slot. Re-planned layers keep as many experts on their current GPUs and slots as possible. Layers whose traffic still fits never move.
 
 ### vLLM
 
