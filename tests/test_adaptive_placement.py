@@ -10,6 +10,7 @@ import torch
 
 from evenmoe import MoELoadBalancer
 from evenmoe.adapters.sglang import to_load_balancer_kwargs, to_placement_request
+from evenmoe.adapters.sglang.placement import _committed_placement
 from evenmoe.core.types import (
     PlacementPolicyConfig,
     PlacementRequest,
@@ -266,3 +267,30 @@ def test_held_out_gain_separates_drift_from_noise():
     assert float(g_drift.min()) > 0.05
     assert float(g_noise.mean()) < float(in_window_noise.mean())
     assert float(g_noise.mean()) < float(g_drift.mean()) / 3
+
+
+def test_sglang_adapter_reads_the_committed_placement_from_host_copies():
+    # Device tensors on "meta" have no data: reading them would fail, so the
+    # snapshots must come from SGLang's host copies.
+    p2l = torch.tensor([[0, 1, 0, 1], [1, 0, 1, 0]])
+    l2p = torch.tensor([[[0, 2, -1, -1], [1, 3, -1, -1]], [[1, 3, -1, -1], [0, 2, -1, -1]]])
+    live = SimpleNamespace(
+        num_logical_experts=2,
+        num_physical_experts=4,
+        num_local_physical_experts=2,
+        physical_to_logical_map=p2l.to("meta"),
+        physical_to_logical_map_cpu=p2l,
+        logical_to_all_physical_map=l2p.to("meta"),
+        logical_to_all_physical_map_cpu=l2p,
+        logical_to_all_physical_map_num_valid=torch.full((2, 2), 2, device="meta"),
+        mlb_routing_metadata={},
+    )
+    current = _committed_placement(live)
+    assert sorted(current) == [0, 1]
+    for layer in (0, 1):
+        snap = current[layer]
+        assert snap.physical_to_logical_map.device.type == "cpu"
+        assert torch.equal(snap.physical_to_logical_map, p2l[layer])
+        assert torch.equal(snap.logical_to_physical_candidates, l2p[layer])
+        assert snap.logical_to_physical_count.tolist() == [2, 2]
+        assert snap.ep_size == 2
