@@ -404,20 +404,27 @@ class AdaptivePlacementPlanner(PlacementPlanner):
         if replanned != list(range(num_layers)):
             # Kept layers keep the committed replica order too (it decides which
             # replica a token's hash picks), so nothing about them changes.
-            kept = [layer for layer in range(num_layers) if layer not in set(replanned)]
+            replanned_set = set(replanned)
+            kept = [layer for layer in range(num_layers) if layer not in replanned_set]
             live = [
-                torch.as_tensor(current[layer].logical_to_physical_candidates) for layer in kept
+                torch.as_tensor(current[layer].logical_to_physical_candidates).to(
+                    "cpu", torch.int64
+                )
+                for layer in kept
             ]
             width = max([l2p.shape[-1]] + [int(t.shape[-1]) for t in live])
             if width > l2p.shape[-1]:
                 l2p = torch.nn.functional.pad(l2p, (0, width - l2p.shape[-1]), value=-1)
-            for layer, cand in zip(kept, live):
-                cand = cand.to("cpu", torch.int64)
-                n = torch.as_tensor(current[layer].logical_to_physical_count).to("cpu", torch.int64)
-                row = torch.full((num_logical, width), -1, dtype=torch.int64)
-                row[:, : cand.shape[-1]] = cand
-                row[torch.arange(width).expand(num_logical, width) >= n.unsqueeze(1)] = -1
-                l2p[layer] = row
+            cand = torch.stack(
+                [torch.nn.functional.pad(t, (0, width - t.shape[-1]), value=-1) for t in live]
+            )
+            n = torch.stack(
+                [
+                    torch.as_tensor(current[layer].logical_to_physical_count).to("cpu", torch.int64)
+                    for layer in kept
+                ]
+            )
+            l2p[kept] = cand.masked_fill(torch.arange(width) >= n.unsqueeze(-1), -1)
         device = logical_count.device
         return PlacementPlan(
             physical_to_logical_map=out.to(device),
